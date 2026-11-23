@@ -16,6 +16,7 @@ and issues next to it.
 - [Lazygit integration](#lazygit-integration)
 - [GitHub integration](#github-integration)
 - [Configuration](#configuration)
+- [Releasing](#releasing)
 - [How it works](#how-it-works)
 
 ## What it does
@@ -55,16 +56,44 @@ gitdeck also **reads your lazygit theme** (`gui.theme` and `gui.border` in lazyg
 
 ## Install
 
+### Install script
+
+macOS or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bkenks/gitdeck/main/install.sh | bash
+```
+
+It downloads the latest release for your OS and CPU, checks it against `SHA256SUMS`, and puts it
+in `~/.local/bin/gitdeck`. Run it again to update.
+
+### mise
+
+```bash
+mise use -g 'github:bkenks/gitdeck[bin=gitdeck,minimum_release_age=0h]'
+```
+
+### Prebuilt binary
+
+Every [release](https://github.com/bkenks/gitdeck/releases) has binaries for macOS, Linux and
+Windows on amd64 and arm64, plus a `SHA256SUMS` file.
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+chmod +x gitdeck-*-darwin-arm64
+mv gitdeck-*-darwin-arm64 ~/.local/bin/gitdeck
+```
+
+### go install / from source
+
 ```bash
 go install github.com/bkenks/gitdeck@latest
 ```
 
-Or from source:
-
 ```bash
 git clone https://github.com/bkenks/gitdeck.git && cd gitdeck
-mise install        # Go 1.26
-go build -o ~/.local/bin/gitdeck .
+mise install          # Go 1.26
+scripts/build.sh      # -> build/bin/gitdeck
 ```
 
 Requires [git](https://git-scm.com/). The GitHub view needs [gh](https://cli.github.com), logged
@@ -192,6 +221,22 @@ The first run creates it, taking `reposDir` and `keybinds` from gitkeeper if you
   Precedence: lazygit's defaults, then your lazygit config, then this.
 - `keybinds`: same format as gitkeeper. The command runs in your shell in the selected repo, with
   the whole terminal. With `returnOnExit` off, gitdeck waits for `enter` so you can read the output.
+
+## Releasing
+
+```bash
+scripts/release.sh patch      # or minor, major, vX.Y.Z; add --dry-run to preview
+```
+
+The script refuses a dirty tree, a branch other than `main`, or a `main` out of sync with
+`origin`. It runs `go vet` and the tests, then tags and pushes. Pushing a `v*` tag triggers
+`.github/workflows/release.yml`, which tests again, cross-compiles all six targets with
+`scripts/build.sh --all`, verifies `SHA256SUMS`, and publishes the GitHub release with notes
+generated since the previous tag. `scripts/build.sh --all` builds the same artifacts locally
+into `build/dist/`.
+
+CI (`.github/workflows/ci.yml`) runs gofmt, vet, the race-enabled tests and the cross-compile on
+every push to `main` and every pull request.
 
 ## How it works
 

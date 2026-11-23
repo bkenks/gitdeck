@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, so the notes can list changes since the last tag
+      - uses: jdx/mise-action@v3
+      - name: Test
+        run: go test ./...
+      - name: Build the release matrix
+        run: scripts/build.sh --all "$GITHUB_REF_NAME"
+      - name: Verify checksums
+        run: cd build/dist && sha256sum -c SHA256SUMS
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="Binaries for macOS, Linux and Windows on amd64 and arm64, plus \`SHA256SUMS\` for \`sha256sum -c\`.
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/bkenks/gitdeck/main/install.sh | bash
+          \`\`\`"
+          args=(--title "$GITHUB_REF_NAME" --generate-notes --notes "$notes")
+          # Changelog since the previous tag; the first release has none.
+          if prev="$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null)"; then
+            args+=(--notes-start-tag "$prev")
+          fi
+          gh release create "$GITHUB_REF_NAME" build/dist/* "${args[@]}"
