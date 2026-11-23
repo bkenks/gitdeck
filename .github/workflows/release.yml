@@ -16,10 +16,10 @@ jobs:
         with:
           fetch-depth: 0 # full history, so the notes can list changes since the last tag
       - uses: jdx/mise-action@v5
-      - name: Test
-        run: go test ./...
+      - name: Lint and test
+        run: mise run check
       - name: Build the release matrix
-        run: scripts/build.sh --all "$GITHUB_REF_NAME"
+        run: mise run build-all "$GITHUB_REF_NAME"
       - name: Verify checksums
         run: cd build/dist && sha256sum -c SHA256SUMS
       - name: Create the GitHub release

@@ -92,9 +92,12 @@ go install github.com/bkenks/gitdeck@latest
 
 ```bash
 git clone https://github.com/bkenks/gitdeck.git && cd gitdeck
-mise install          # Go 1.26
-scripts/build.sh      # -> build/bin/gitdeck
+mise install          # Go 1.26 plus the lint tools
+mise run build        # -> build/bin/gitdeck
 ```
+
+`mise tasks` lists the rest: `install`, `run`, `test`, `lint`, `fmt`, `check` (everything CI runs),
+`build-all`, `release` and `clean`.
 
 Requires [git](https://git-scm.com/). The GitHub view needs [gh](https://cli.github.com), logged
 in with `gh auth login`. Lazygit integration needs
@@ -225,18 +228,19 @@ The first run creates it, taking `reposDir` and `keybinds` from gitkeeper if you
 ## Releasing
 
 ```bash
-scripts/release.sh patch      # or minor, major, vX.Y.Z; add --dry-run to preview
+mise run release patch        # or minor, major, vX.Y.Z; add --dry-run to preview
 ```
 
 The script refuses a dirty tree, a branch other than `main`, or a `main` out of sync with
-`origin`. It runs `go vet` and the tests, then tags and pushes. Pushing a `v*` tag triggers
+`origin`. It runs `mise run check`, then tags and pushes. Pushing a `v*` tag triggers
 `.github/workflows/release.yml`, which tests again, cross-compiles all six targets with
 `scripts/build.sh --all`, verifies `SHA256SUMS`, and publishes the GitHub release with notes
-generated since the previous tag. `scripts/build.sh --all` builds the same artifacts locally
-into `build/dist/`.
+generated since the previous tag. `mise run build-all` builds the same artifacts locally into
+`build/dist/`.
 
-CI (`.github/workflows/ci.yml`) runs gofmt, vet, the race-enabled tests and the cross-compile on
-every push to `main` and every pull request.
+CI (`.github/workflows/ci.yml`) runs `mise run check` (gofmt, vet, golangci-lint, shellcheck,
+shfmt and the race-enabled tests) and the cross-compile on every push to `main` and every pull
+request.
 
 ## How it works
 

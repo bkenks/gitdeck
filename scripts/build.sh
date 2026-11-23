@@ -49,12 +49,15 @@ build_all() {
       go build -trimpath -ldflags "$(ldflags "$version")" -o "$out" .
     echo "$out"
   done
-  (cd build/dist && sha256sum gitdeck-* > SHA256SUMS)
+  (cd build/dist && sha256sum gitdeck-* >SHA256SUMS)
   echo "build/dist/SHA256SUMS"
 }
 
 case "${1:-}" in
 --all) build_all "${2:-}" ;;
 "") build_host ;;
-*) echo "usage: scripts/build.sh [--all [VERSION]]" >&2; exit 2 ;;
+*)
+  echo "usage: scripts/build.sh [--all [VERSION]]" >&2
+  exit 2
+  ;;
 esac

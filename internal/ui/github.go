@@ -110,13 +110,6 @@ func newGHState(cfg config.Config) ghState {
 	}
 }
 
-func (g *ghState) panel(k gh.Kind) *ghPanel {
-	if k == gh.PR {
-		return &g.prs
-	}
-	return &g.issues
-}
-
 func (g *ghState) sections(k gh.Kind) []section {
 	base := g.cfg.PRSections
 	if k == gh.Issue {
@@ -747,8 +740,6 @@ func (a *App) previewPanelView(w, h int) string {
 }
 
 // ─── Keys ───────────────────────────────────────────────────────────────────
-
-var ghOrder = []pane{pPRs, pIssues}
 
 func (a *App) ghKey(key string) (bool, tea.Cmd) {
 	switch key {

@@ -15,7 +15,10 @@ cd "$(dirname "$0")/.."
 
 readonly BRANCH=main REMOTE=origin
 
-die() { echo "release: $*" >&2; exit 1; }
+die() {
+  echo "release: $*" >&2
+  exit 1
+}
 
 spec="${1:-}"
 dry_run=false
@@ -52,9 +55,8 @@ if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
 fi
 
 echo "Releasing $next (latest was $latest)"
-echo "Running tests..."
-go vet ./...
-go test ./...
+echo "Running checks..."
+mise run check
 
 if $dry_run; then
   echo "Dry run: would tag $next and push it to $REMOTE."

@@ -205,7 +205,7 @@ func Color(s string) color.Color {
 // default foreground is the one color every theme makes readable.
 func Over(cell, sel lipgloss.Style) lipgloss.Style {
 	bg := sel.GetBackground()
-	if _, none := bg.(lipgloss.NoColor); bg != nil && !none {
+	if _, none := bg.(lipgloss.NoColor); !none {
 		// Faint text washes out on a colored bar too.
 		cell = cell.UnsetForeground().Background(bg).Faint(false)
 	}
@@ -221,12 +221,16 @@ func Over(cell, sel lipgloss.Style) lipgloss.Style {
 	if sel.GetItalic() {
 		cell = cell.Italic(true)
 	}
-	if fg := sel.GetForeground(); fg != nil {
-		if _, none := fg.(lipgloss.NoColor); !none {
-			cell = cell.Foreground(fg)
-		}
+	if fg := sel.GetForeground(); !isNoColor(fg) {
+		cell = cell.Foreground(fg)
 	}
 	return cell
+}
+
+// isNoColor reports an unset color; lipgloss returns NoColor, not nil.
+func isNoColor(c color.Color) bool {
+	_, none := c.(lipgloss.NoColor)
+	return none || c == nil
 }
 
 // Author picks a stable color for a commit author.

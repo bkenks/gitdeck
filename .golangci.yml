@@ -1,0 +1,9 @@
+version: "2"
+
+linters:
+  settings:
+    staticcheck:
+      # internal/ui draws with theme.T on nearly every line; the dot import
+      # keeps that readable. Nothing else may be dot-imported.
+      dot-import-whitelist:
+        - github.com/bkenks/gitdeck/internal/theme

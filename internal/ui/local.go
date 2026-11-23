@@ -220,15 +220,6 @@ func (a *App) selectedRepo() *git.Repo {
 	return &a.repos[i]
 }
 
-func (a *App) repoByPath(path string) *git.Repo {
-	for i := range a.repos {
-		if a.repos[i].Path == path {
-			return &a.repos[i]
-		}
-	}
-	return nil
-}
-
 // repoBySlug finds a local clone of a GitHub repo.
 func (a *App) repoBySlug(slug string) *git.Repo {
 	slug = strings.ToLower(slug)

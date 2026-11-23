@@ -110,7 +110,6 @@ type App struct {
 	rects       []rect
 	hasLazygit  bool
 	sortMode    string
-	initialSlug string
 }
 
 func New(cfg config.Config, opts Options) *App {

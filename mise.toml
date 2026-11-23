@@ -1,4 +1,54 @@
-# Toolchain for gitdeck. `mise install`, then `go build` or `go test ./...`.
+# Toolchain and tasks for gitdeck. `mise install` provisions everything;
+# `mise tasks` lists the tasks. They wrap scripts/ so CI runs the same steps.
 
 [tools]
 go = "1.26.8"
+golangci-lint = "2.13.2"
+shellcheck = "0.11.0"
+shfmt = "3.14.1"
+
+[tasks.build]
+description = "Build for this machine into build/bin/gitdeck"
+run = "scripts/build.sh"
+
+[tasks.build-all]
+description = "Cross-compile the release matrix into build/dist/ with SHA256SUMS (optional: version)"
+run = "scripts/build.sh --all"
+
+[tasks.install]
+description = "Build and install gitdeck to $GOBIN (or $(go env GOPATH)/bin)"
+run = 'go install -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" .'
+
+[tasks.run]
+description = "Build and run gitdeck from source"
+run = "go run ."
+
+[tasks.test]
+description = "Run the tests with the race detector"
+run = "go test -race ./..."
+
+[tasks.lint]
+description = "gofmt, go vet, golangci-lint, shellcheck and shfmt"
+run = [
+  'test -z "$(gofmt -l .)" || { gofmt -l .; echo "run: gofmt -w ."; exit 1; }',
+  "go vet ./...",
+  "golangci-lint run",
+  "shellcheck scripts/*.sh install.sh",
+  "shfmt -d -i 2 scripts/*.sh install.sh",
+]
+
+[tasks.fmt]
+description = "Format Go and shell sources"
+run = ["gofmt -w .", "shfmt -w -i 2 scripts/*.sh install.sh"]
+
+[tasks.check]
+description = "Everything CI checks: lint and tests"
+depends = ["lint", "test"]
+
+[tasks.release]
+description = "Test, tag and push a release: patch|minor|major|vX.Y.Z [--dry-run]"
+run = "scripts/release.sh"
+
+[tasks.clean]
+description = "Remove build output"
+run = "rm -rf build"
