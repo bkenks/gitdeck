@@ -12,8 +12,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v3
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "run gofmt -w ."; exit 1; }
       - run: go vet ./...
