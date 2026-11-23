@@ -1,0 +1,4 @@
+# Toolchain for gitdeck. `mise install`, then `go build` or `go test ./...`.
+
+[tools]
+go = "1.26.8"
