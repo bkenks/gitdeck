@@ -50,6 +50,8 @@ func TestLocalFocusKeys(t *testing.T) {
 		{"esc in a list", []string{"3", "esc"}, pBranches},
 		{"tab round trip keeps main", []string{"4", "0", "tab", "tab"}, pDetail},
 		{"and its way back", []string{"4", "0", "tab", "tab", "esc"}, pCommits},
+		{"a GitHub preview visit keeps main's way back",
+			[]string{"4", "0", "tab", "0", "tab", "esc"}, pCommits},
 	}
 	for _, c := range cases {
 		a := focusApp(t)
@@ -193,6 +195,8 @@ func TestGHFocusKeys(t *testing.T) {
 		{"esc in a list", []string{"2", "esc"}, pIssues},
 		{"tab round trip keeps the preview", []string{"2", "0", "tab", "tab"}, pDetail},
 		{"and its way back", []string{"2", "0", "tab", "tab", "esc"}, pIssues},
+		{"a local main visit keeps the preview's way back",
+			[]string{"2", "0", "tab", "4", "0", "tab", "esc"}, pIssues},
 	}
 	for _, c := range cases {
 		a := ghFocusApp(t)

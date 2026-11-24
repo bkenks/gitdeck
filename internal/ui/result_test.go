@@ -244,8 +244,8 @@ func TestGHCheckoutResult(t *testing.T) {
 		a.mode, a.focus, a.branchTab = modeGitHub, pPRs, 2
 		update(a, a.checkedOut(it, checkout, false, false))
 		checkResult(t, a, logged, "Checked out #12 (feature)", false)
-		if a.mode != modeLocal || a.focus != pBranches || a.lfocus != pBranches || a.gfocus != pPRs {
-			t.Errorf("mode %v focus %v lfocus %v gfocus %v", a.mode, a.focus, a.lfocus, a.gfocus)
+		if a.mode != modeLocal || a.focus != pBranches || a.saved[modeGitHub].focus != pPRs {
+			t.Errorf("mode %v focus %v saved GitHub focus %v", a.mode, a.focus, a.saved[modeGitHub].focus)
 		}
 		if a.branchTab != 0 {
 			t.Errorf("branchTab = %d, want local branches", a.branchTab)

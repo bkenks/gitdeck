@@ -923,10 +923,9 @@ func (a *App) checkedOut(it gh.Item, r proc.Result, cloned, lazy bool) resultMsg
 
 func (a *App) showCheckout(path string, cloned, lazy bool) tea.Cmd {
 	if a.mode == modeGitHub {
-		a.gfocus = a.focus
-		a.mode = modeLocal
+		a.enterMode(modeLocal)
 	}
-	a.focus, a.lfocus = pBranches, pBranches
+	a.focus = pBranches
 	a.branchTab = 0
 	var cmds []tea.Cmd
 	if cloned {

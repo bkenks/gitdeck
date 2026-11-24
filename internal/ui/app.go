@@ -67,11 +67,10 @@ type App struct {
 	opts  Options
 	w, h  int
 
-	mode   mode
-	focus  pane // focus within the current mode
-	lfocus pane // remembered local focus while in GitHub mode
-	gfocus pane // and vice versa
-	back   pane // the list the detail pane shows while it has focus
+	mode  mode
+	focus pane          // focus within the current mode
+	back  pane          // the list the detail pane shows while it has focus
+	saved [2]focusState // each mode's focus while the other is on screen
 
 	// Local
 	repos    []git.Repo
@@ -119,12 +118,15 @@ type App struct {
 
 func New(cfg config.Config, opts Options) *App {
 	a := &App{
-		cfg:       cfg,
-		state:     config.LoadState(),
-		opts:      opts,
-		focus:     pRepos,
-		lfocus:    pRepos,
-		gfocus:    pPRs,
+		cfg:   cfg,
+		state: config.LoadState(),
+		opts:  opts,
+		focus: pRepos,
+		back:  pRepos,
+		saved: [2]focusState{
+			modeLocal:  {focus: pRepos, back: pRepos},
+			modeGitHub: {focus: pPRs, back: pPRs},
+		},
 		collapsed: map[string]bool{},
 		showLog:   true,
 		spin:      spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(T.Cyan)),
@@ -134,7 +136,7 @@ func New(cfg config.Config, opts Options) *App {
 	a.gh = newGHState(cfg)
 	a.bindLists()
 	if opts.GitHub {
-		a.mode, a.focus = modeGitHub, pPRs
+		a.mode, a.focus, a.back = modeGitHub, pPRs, pPRs
 	}
 	return a
 }
@@ -484,15 +486,24 @@ func (a *App) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	return a.customKeybind(key)
 }
 
+// focusState is where focus sits in one mode. back travels with focus so
+// the detail pane comes back showing the same list after a mode switch.
+type focusState struct{ focus, back pane }
+
 func (a *App) switchMode() tea.Cmd {
 	if a.mode == modeLocal {
-		a.lfocus = a.focus
-		a.mode, a.focus = modeGitHub, a.gfocus
+		a.enterMode(modeGitHub)
 		return a.ghEnsure()
 	}
-	a.gfocus = a.focus
-	a.mode, a.focus = modeLocal, a.lfocus
+	a.enterMode(modeLocal)
 	return a.syncMain()
+}
+
+// enterMode saves the current mode's focus and restores m's.
+func (a *App) enterMode(m mode) {
+	a.saved[a.mode] = focusState{a.focus, a.back}
+	a.mode = m
+	a.focus, a.back = a.saved[m].focus, a.saved[m].back
 }
 
 // listFor returns the list behind a pane, if it has one.
