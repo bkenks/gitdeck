@@ -31,41 +31,6 @@ func TestParseBranchLine(t *testing.T) {
 	}
 }
 
-func TestGitHubSlug(t *testing.T) {
-	for url, want := range map[string]string{
-		"git@github.com:bkenks/gitdeck.git":     "bkenks/gitdeck",
-		"https://github.com/bkenks/gitdeck":     "bkenks/gitdeck",
-		"https://github.com/bkenks/gitdeck.git": "bkenks/gitdeck",
-		"ssh://git@github.com/bkenks/gitdeck":   "bkenks/gitdeck",
-		"git@gitlab.com:bkenks/gitdeck.git":     "",
-		"":                                      "",
-	} {
-		if got := GitHubSlug(url); got != want {
-			t.Errorf("GitHubSlug(%q) = %q, want %q", url, got, want)
-		}
-	}
-}
-
-func TestCloneDest(t *testing.T) {
-	root := "/r"
-	cases := []struct{ url, dest, slug string }{
-		{"git@github.com:bkenks/gitdeck.git", "/r/bkenks/gitdeck", ""},
-		{"https://github.com/bkenks/gitdeck", "/r/bkenks/gitdeck", ""},
-		{"bkenks/gitdeck", "/r/bkenks/gitdeck", "bkenks/gitdeck"},
-		{"git@gitlab.com:group/proj.git", "/r/group/proj", ""},
-		{"https://git.example.com/a/b/c.git", "/r/b/c", ""},
-	}
-	for _, c := range cases {
-		dest, slug, err := CloneDest(root, c.url)
-		if err != nil || dest != c.dest || slug != c.slug {
-			t.Errorf("CloneDest(%q) = %q, %q, %v; want %q, %q", c.url, dest, slug, err, c.dest, c.slug)
-		}
-	}
-	if _, _, err := CloneDest(root, "   "); err == nil {
-		t.Error("empty URL should fail")
-	}
-}
-
 func TestRemoveRefusesOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

@@ -155,19 +155,6 @@ func TestNormalizeKey(t *testing.T) {
 	}
 }
 
-func TestWebURL(t *testing.T) {
-	for in, want := range map[string]string{
-		"git@gitlab.com:group/proj.git":         "https://gitlab.com/group/proj",
-		"ssh://git@codeberg.org/me/thing.git":   "https://codeberg.org/me/thing",
-		"https://github.com/bkenks/gitdeck.git": "https://github.com/bkenks/gitdeck",
-		"/local/path":                           "",
-	} {
-		if got := webURL(in); got != want {
-			t.Errorf("webURL(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestColorDiffUsesOnlyANSIColors(t *testing.T) {
 	diff := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@ ctx\n-old\n+new\n x | 2 +-\n"
 	for _, l := range colorDiff(diff) {

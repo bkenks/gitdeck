@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -936,7 +935,10 @@ func (a *App) ghCheckout(it gh.Item, lazy bool) tea.Cmd {
 		a.openReposDirPrompt()
 		return nil
 	}
-	dest := filepath.Join(root, filepath.FromSlash(it.Repo))
+	dest, _, err := git.CloneDest(root, it.Repo)
+	if err != nil {
+		return a.flash(err.Error(), true)
+	}
 	a.confirm("Clone "+it.Repo+"?", []string{
 		"You don't have " + T.Bold.Render(it.Repo) + " locally yet.",
 		"Clone it into " + T.Cyan.Render(config.TildePath(dest)) + " and check out #" + itoa(it.Number) + "?",

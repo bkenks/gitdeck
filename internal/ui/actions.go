@@ -163,31 +163,12 @@ func openURL(url string) tea.Cmd {
 	}
 }
 
-// webURL turns a remote URL into its https page.
-func webURL(remote string) string {
-	u := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
-	switch {
-	case strings.HasPrefix(u, "git@"):
-		u = "https://" + strings.Replace(strings.TrimPrefix(u, "git@"), ":", "/", 1)
-	case strings.HasPrefix(u, "ssh://"):
-		u = strings.TrimPrefix(u, "ssh://")
-		if i := strings.Index(u, "@"); i >= 0 {
-			u = u[i+1:]
-		}
-		u = "https://" + u
-	case strings.HasPrefix(u, "http://"), strings.HasPrefix(u, "https://"):
-	default:
-		return ""
-	}
-	return u
-}
-
 func (a *App) openRepoWeb(r *git.Repo, sub string) tea.Cmd {
 	base := ""
 	if r.Stats.Slug != "" {
 		base = "https://github.com/" + r.Stats.Slug
 	} else {
-		base = webURL(r.Stats.RemoteURL)
+		base = git.ParseRemote(r.Stats.RemoteURL).WebURL()
 	}
 	if base == "" {
 		return a.flash("This repo has no web remote", true)

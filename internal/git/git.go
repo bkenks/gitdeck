@@ -234,7 +234,7 @@ func LoadStats(dir string) Stats {
 	})
 	wg.Go(func() {
 		s.RemoteURL = RemoteURL(dir)
-		s.Slug = GitHubSlug(s.RemoteURL)
+		s.Slug = ParseRemote(s.RemoteURL).GitHubSlug()
 	})
 	wg.Wait()
 	return s
@@ -252,20 +252,6 @@ func RemoteURL(dir string) string {
 	if name := firstLine(strings.TrimSpace(out)); name != "" {
 		if u, err := Read(dir, "remote", "get-url", name); err == nil {
 			return strings.TrimSpace(u)
-		}
-	}
-	return ""
-}
-
-// GitHubSlug extracts owner/name from a github.com remote URL.
-func GitHubSlug(url string) string {
-	u := strings.TrimSuffix(strings.TrimSpace(url), ".git")
-	for _, p := range []string{"git@github.com:", "ssh://git@github.com/", "https://github.com/", "http://github.com/", "git://github.com/"} {
-		if strings.HasPrefix(u, p) {
-			parts := strings.Split(strings.TrimPrefix(u, p), "/")
-			if len(parts) >= 2 {
-				return parts[0] + "/" + parts[1]
-			}
 		}
 	}
 	return ""
@@ -706,35 +692,4 @@ func inside(dir, path string) bool {
 		return false
 	}
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// CloneDest works out where a clone URL (or owner/name) lands under root:
-// <root>/<owner>/<name>, like gitkeeper.
-func CloneDest(root, url string) (dest string, ghSlug string, err error) {
-	u := strings.TrimSpace(url)
-	if u == "" {
-		return "", "", errors.New("empty URL")
-	}
-	if s := GitHubSlug(u); s != "" {
-		return filepath.Join(root, filepath.FromSlash(s)), "", nil
-	}
-	// owner/name shorthand goes through gh, which honours its git protocol.
-	if parts := strings.Split(u, "/"); len(parts) == 2 && !strings.Contains(u, ":") && parts[0] != "" && parts[1] != "" {
-		return filepath.Join(root, parts[0], strings.TrimSuffix(parts[1], ".git")), u, nil
-	}
-	trim := strings.TrimSuffix(u, ".git")
-	trim = strings.TrimSuffix(trim, "/")
-	if i := strings.Index(trim, "://"); i >= 0 {
-		trim = trim[i+3:]
-	}
-	if i := strings.Index(trim, "@"); i >= 0 {
-		trim = trim[i+1:]
-	}
-	trim = strings.Replace(trim, ":", "/", 1)
-	parts := strings.Split(trim, "/")
-	if len(parts) < 2 {
-		return "", "", fmt.Errorf("can't tell where %q should go", url)
-	}
-	ns, name := parts[len(parts)-2], parts[len(parts)-1]
-	return filepath.Join(root, ns, name), "", nil
 }
