@@ -784,8 +784,9 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 	ghRun := func(label, ok string, fn func() proc.Result) tea.Cmd {
 		then := refresh()
 		return a.withBusy(label, func() tea.Msg {
-			m := resultMsg{results: []proc.Result{fn()}, ok: ok}
-			if m.results[0].Err == nil {
+			r := fn()
+			m := resultMsg{results: []proc.Result{r}, ok: ok}
+			if r.Err == nil {
 				m.then = func() tea.Cmd { return then }
 			}
 			return m
