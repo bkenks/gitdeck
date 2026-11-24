@@ -69,7 +69,10 @@ func TestCloneDest(t *testing.T) {
 		{"user@host:o/r.git", "/r/o/r", ""},
 		{"/srv/git/proj.git", "/r/git/proj", ""},
 		{"file:///srv/git/proj.git", "/r/git/proj", ""},
+		{"file:///proj.git", "/r/proj", ""},
 		{"C:/src/proj", "/r/src/proj", ""},
+		{"x:o/r.git", "/r/o/r", ""},
+		{"x:r.git", "/r/x/r", ""},
 	}
 	for _, c := range cases {
 		dest, slug, err := CloneDest(root, c.url)
@@ -135,6 +138,8 @@ func TestParseRemote(t *testing.T) {
 		{"file:///srv/r.git", Remote{Scheme: "file", Path: "srv/r"}},
 		{"/srv/r.git", Remote{Path: "/srv/r"}},
 		{"C:/src/r", Remote{Path: "C:/src/r"}},
+		{`C:\src\r`, Remote{Path: `C:\src\r`}},
+		{"x:o/r.git", Remote{Host: "x", Path: "o/r"}},
 		{"o/r", Remote{Path: "o/r"}},
 		{"", Remote{}},
 	}

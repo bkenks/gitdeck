@@ -41,12 +41,18 @@ func ParseRemote(raw string) Remote {
 }
 
 // isSCP reports whether s is scp-style host:path, which git recognises by a
-// colon before the first slash. A lone letter before the colon is a Windows
-// drive (C:/src), not a host.
+// colon before the first slash. A lone letter followed by ":/" or ":\" is a
+// Windows drive (C:/src); any other lone letter is a host, such as an ssh
+// alias (x:owner/name).
 func isSCP(s string) bool {
 	colon := strings.Index(s, ":")
 	slash := strings.Index(s, "/")
-	return colon > 1 && (slash < 0 || colon < slash)
+	if colon < 1 || (slash >= 0 && slash < colon) {
+		return false
+	}
+	afterColon := s[colon+1:]
+	drive := colon == 1 && (strings.HasPrefix(afterColon, "/") || strings.HasPrefix(afterColon, `\`))
+	return !drive
 }
 
 // GitHubSlug is owner/name when r points at github.com, else "".
@@ -110,7 +116,9 @@ func CloneDest(root, url string) (dest string, ghSlug string, err error) {
 		return filepath.Join(root, filepath.FromSlash(s)), s, nil
 	}
 	path := strings.TrimSuffix(r.Path, "/")
-	if r.Host != "" {
+	// A URL's host is the first segment even when it's empty, as in
+	// file:///repo.git, so a one-segment path still lands in <root>/repo.
+	if r.Host != "" || r.Scheme != "" {
 		path = r.Host + "/" + path
 	}
 	parts := strings.Split(path, "/")
