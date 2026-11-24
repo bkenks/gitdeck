@@ -34,10 +34,11 @@ const (
 	pBranches
 	pCommits
 	pStash
-	pMain
 	pPRs
 	pIssues
-	pPreview
+	// pDetail is the right-hand pane: the main panel in local mode, the
+	// preview in GitHub mode.
+	pDetail
 )
 
 // Options are startup settings from main.
@@ -70,7 +71,7 @@ type App struct {
 	focus  pane // focus within the current mode
 	lfocus pane // remembered local focus while in GitHub mode
 	gfocus pane // and vice versa
-	back   pane // where esc returns to from the main panel
+	back   pane // the list the detail pane shows while it has focus
 
 	// Local
 	repos    []git.Repo
@@ -477,20 +478,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return tea.Batch(a.scan(), a.loadAllStats(a.repoPaths()), a.refreshAll())
 	}
-	var c tea.Cmd
-	var handled bool
-	if a.mode == modeLocal {
-		handled, c = a.localKey(key)
-	} else {
-		handled, c = a.ghKey(key)
-	}
-	if handled {
+	if handled, c := a.paneKey(key); handled {
 		return tea.Batch(c, a.syncMain())
 	}
-	if c := a.customKeybind(key); c != nil {
-		return c
-	}
-	return nil
+	return a.customKeybind(key)
 }
 
 func (a *App) switchMode() tea.Cmd {
@@ -523,50 +514,6 @@ func (a *App) listFor(p pane) *list {
 		return &a.gh.issues.list
 	}
 	return nil
-}
-
-// navKey handles movement shared by every list panel.
-func navKey(key string, l *list, h int) bool {
-	page := max(1, h-2)
-	switch key {
-	case "j", "down":
-		l.move(1)
-	case "k", "up":
-		l.move(-1)
-	case "ctrl+d", "pgdown":
-		l.move(page / 2)
-	case "ctrl+u", "pgup":
-		l.move(-page / 2)
-	case "g", "home":
-		l.cursor = 0
-	case "G", "end":
-		l.cursor = l.len() - 1
-		l.clamp()
-	default:
-		return false
-	}
-	return true
-}
-
-// pagerKey scrolls a pager h rows tall.
-func pagerKey(key string, p *pager, h int) bool {
-	switch key {
-	case "j", "down":
-		p.scroll(1, h)
-	case "k", "up":
-		p.scroll(-1, h)
-	case "ctrl+d", "pgdown", "space":
-		p.scroll(h/2, h)
-	case "ctrl+u", "pgup":
-		p.scroll(-h/2, h)
-	case "g", "home":
-		p.offset = 0
-	case "G", "end":
-		p.scroll(len(p.lines), h)
-	default:
-		return false
-	}
-	return true
 }
 
 // ─── Filter ─────────────────────────────────────────────────────────────────
@@ -658,12 +605,8 @@ func (a *App) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	if m.Button == tea.MouseWheelUp {
 		d = -3
 	}
-	switch r.p {
-	case pMain:
-		a.main.scroll(d, r.h-2)
-		return nil
-	case pPreview:
-		a.gh.preview.scroll(d, r.h-2)
+	if r.p == pDetail {
+		a.detailPager().scroll(d, r.h-2)
 		return nil
 	}
 	if l := a.listFor(r.p); l != nil {
@@ -707,12 +650,26 @@ func (a *App) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 }
 
 func (a *App) setFocus(p pane) {
-	if p == pMain || p == pPreview {
-		if a.focus != pMain && a.focus != pPreview {
-			a.back = a.focus
-		}
+	if p == pDetail && a.focus != pDetail {
+		a.back = a.focus
 	}
 	a.focus = p
+}
+
+// detailSource is the list pane whose selection the detail pane shows.
+func (a *App) detailSource() pane {
+	if a.focus == pDetail {
+		return a.back
+	}
+	return a.focus
+}
+
+// detailPager is the detail pane's scroll state in the current mode.
+func (a *App) detailPager() *pager {
+	if a.mode == modeGitHub {
+		return &a.gh.preview
+	}
+	return &a.main
 }
 
 // afterMove reacts to the cursor moving in pane p.

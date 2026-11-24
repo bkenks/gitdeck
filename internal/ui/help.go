@@ -42,10 +42,8 @@ func (a *App) paneHints(p pane) (string, []hint) {
 		return "Stash", []hint{
 			h("<space>", "Apply"), h("g", "Pop"), h("d", "Drop"), h("L", "Lazygit"),
 		}
-	case pMain:
-		return "Main panel", []hint{
-			h("j/k", "Scroll"), h("ctrl+d/u", "Page"), h("g/G", "Top/bottom"), h("esc", "Back"),
-		}
+	case pDetail:
+		return a.detailHints()
 	case pPRs:
 		return "Pull requests", []hint{
 			h("<space>", "Checkout"), h("L", "Checkout + lazygit"), h("o", "Open"), h("d", "Diff"),
@@ -58,12 +56,19 @@ func (a *App) paneHints(p pane) (string, []hint) {
 			h("o", "Open"), h("c", "Comment"), h("x", "Close"), h("[ ]", "Sections"), h("s", "Search"),
 			hx("X", "Reopen"), hx("y", "Copy URL"), hx("/", "Filter"), hx("enter", "Read preview"),
 		}
-	case pPreview:
+	}
+	return "", nil
+}
+
+func (a *App) detailHints() (string, []hint) {
+	if a.mode == modeGitHub {
 		return "Preview", []hint{
 			h("j/k", "Scroll"), h("ctrl+d/u", "Page"), h("d", "Toggle diff"), h("esc", "Back"),
 		}
 	}
-	return "", nil
+	return "Main panel", []hint{
+		h("j/k", "Scroll"), h("ctrl+d/u", "Page"), h("g/G", "Top/bottom"), h("esc", "Back"),
+	}
 }
 
 func (a *App) hints() []hint {

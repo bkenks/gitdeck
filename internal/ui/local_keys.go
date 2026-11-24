@@ -18,59 +18,11 @@ import (
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
 
-var localOrder = []pane{pRepos, pFiles, pBranches, pCommits, pStash}
-
-func (a *App) panelRows(p pane) int {
-	for _, r := range a.rects {
-		if r.p == p {
-			return r.h - 2
-		}
-	}
-	return 10
-}
-
+// localKey handles local mode's own keys: repo actions and the focused
+// panel's actions.
 func (a *App) localKey(key string) (bool, tea.Cmd) {
-	// Panel focus, lazygit style.
-	switch key {
-	case "1", "2", "3", "4", "5":
-		a.setFocus(localOrder[key[0]-'1'])
-		return true, a.afterMove(a.focus)
-	case "0":
-		a.setFocus(pMain)
-		return true, nil
-	case "h", "left", "l", "right":
-		if a.focus == pMain {
-			a.focus = a.back
-			return true, nil
-		}
-		d := 1
-		if key == "h" || key == "left" {
-			d = -1
-		}
-		for i, p := range localOrder {
-			if p == a.focus {
-				a.focus = localOrder[(i+d+len(localOrder))%len(localOrder)]
-				break
-			}
-		}
-		return true, a.afterMove(a.focus)
-	case "/":
-		a.startFilter()
-		return true, nil
-	case "esc":
-		if a.focus == pMain {
-			a.focus = a.back
-			return true, nil
-		}
-		if a.filterText() != "" {
-			a.setFilter("")
-			return true, a.afterMove(a.focus)
-		}
-		return true, nil
-	}
-
 	repo := a.selectedRepo()
-	if repo != nil && a.focus != pMain {
+	if repo != nil && a.focus != pDetail {
 		switch key {
 		case "L", "ctrl+g":
 			return true, a.openLazygit(repo.Path, a.lazygitArgs()...)
@@ -113,23 +65,13 @@ func (a *App) localKey(key string) (bool, tea.Cmd) {
 		if handled, c := a.stashKey(key, repo); handled {
 			return true, c
 		}
-	case pMain:
-		return pagerKey(key, &a.main, a.panelRows(pMain)), nil
-	}
-
-	if l := a.listFor(a.focus); l != nil && navKey(key, l, a.panelRows(a.focus)) {
-		return true, a.afterMove(a.focus)
 	}
 	return false, nil
 }
 
 // lazygitArgs picks the lazygit panel matching the focused gitdeck panel.
 func (a *App) lazygitArgs() []string {
-	p := a.focus
-	if p == pMain {
-		p = a.back
-	}
-	switch p {
+	switch a.detailSource() {
 	case pBranches:
 		return []string{"branch"}
 	case pCommits:
@@ -229,7 +171,7 @@ func (a *App) filesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 			a.filesL.refilter()
 			return true, nil
 		}
-		a.setFocus(pMain)
+		a.setFocus(pDetail)
 		return true, nil
 	}
 	return false, nil
@@ -284,7 +226,7 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		}
 		return true, a.openRepoWeb(repo, "tree/"+short)
 	case "enter":
-		a.setFocus(pMain)
+		a.setFocus(pDetail)
 		return true, nil
 	}
 	return false, nil
@@ -305,7 +247,7 @@ func (a *App) commitsKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 	case "o":
 		return true, a.openRepoWeb(repo, "commit/"+c.Hash)
 	case "enter":
-		a.setFocus(pMain)
+		a.setFocus(pDetail)
 		return true, nil
 	}
 	return false, nil
@@ -330,7 +272,7 @@ func (a *App) stashKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 			a.run("Dropping stash", true, "Dropped "+ref, func() proc.Result { return git.StashDrop(dir, ref) }))
 		return true, nil
 	case "enter":
-		a.setFocus(pMain)
+		a.setFocus(pDetail)
 		return true, nil
 	}
 	return false, nil

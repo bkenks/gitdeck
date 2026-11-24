@@ -666,11 +666,7 @@ func (a *App) wantMain() (key, title string, load func() []string) {
 		return "", "", nil
 	}
 	dir := a.cur.path
-	p := a.focus
-	if p == pMain {
-		p = a.back
-	}
-	switch p {
+	switch a.detailSource() {
 	case pRepos:
 		return "repo:" + dir, "Repository", func() []string {
 			out, err := git.Graph(dir, "HEAD", 120)
@@ -869,11 +865,12 @@ func (a *App) sideWidth() int {
 func (a *App) localView(bh int) string {
 	lw := a.sideWidth()
 	rw := a.w - lw
-	order := []pane{pRepos, pFiles, pBranches, pCommits, pStash}
+	order := localNav.lists
 	weights := []int{3, 3, 2, 3, 0}
 	mins := []int{3, 3, 3, 3, 3}
+	grow := a.detailSource()
 	for i, p := range order {
-		if p == a.focus || (a.focus == pMain && p == a.back) {
+		if p == grow {
 			if p == pStash {
 				weights[i] = 2
 			} else {
@@ -896,7 +893,7 @@ func (a *App) localView(bh int) string {
 	}
 	mainH := bh - logH
 	right := []string{a.mainPanel(rw, mainH)}
-	a.rects = append(a.rects, rect{lw, 1, rw, mainH, pMain})
+	a.rects = append(a.rects, rect{lw, 1, rw, mainH, pDetail})
 	if logH > 0 {
 		right = append(right, a.logPanel(rw, logH))
 	}
@@ -956,9 +953,9 @@ func (a *App) localPanel(p pane, w, h int) string {
 
 func (a *App) mainPanel(w, h int) string {
 	inner, rows := w-2, h-2
-	pn := Panel{W: w, H: h, Index: "0", Title: a.mainTitle, Focused: a.focus == pMain}
+	pn := Panel{W: w, H: h, Index: "0", Title: a.mainTitle, Focused: a.focus == pDetail}
 	var body []string
-	if a.focus == pRepos || (a.focus == pMain && a.back == pRepos) {
+	if a.detailSource() == pRepos {
 		pn.Title = "Repository"
 		body = indent(a.repoSummary(inner - 2))
 	}

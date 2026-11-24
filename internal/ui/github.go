@@ -270,11 +270,7 @@ func (a *App) ghRefresh() tea.Cmd {
 
 // previewPanel is the list whose selection the preview follows.
 func (a *App) previewPanel() *ghPanel {
-	p := a.focus
-	if p == pPreview {
-		p = a.back
-	}
-	if p == pIssues {
+	if a.detailSource() == pIssues {
 		return &a.gh.issues
 	}
 	return &a.gh.prs
@@ -669,7 +665,7 @@ func (a *App) ghView(bh int) string {
 	lw = min(lw, a.w-32)
 	rw := a.w - lw
 	weights := []int{3, 2}
-	if a.focus == pIssues || (a.focus == pPreview && a.back == pIssues) {
+	if a.detailSource() == pIssues {
 		weights = []int{2, 3}
 	}
 	hs := distribute(bh, weights, []int{5, 5})
@@ -682,7 +678,7 @@ func (a *App) ghView(bh int) string {
 	}
 	ph := bh - logH
 	right := []string{a.previewPanelView(rw, ph)}
-	a.rects = append(a.rects, rect{lw, 1, rw, ph, pPreview})
+	a.rects = append(a.rects, rect{lw, 1, rw, ph, pDetail})
 	if logH > 0 {
 		right = append(right, a.logPanel(rw, logH))
 	}
@@ -730,7 +726,7 @@ func (a *App) previewPanelView(w, h int) string {
 	a.previewLines(inner - 2)
 	// view returns a window onto the cached lines; indent copies them.
 	body := indent(a.gh.preview.view(rows))
-	p := Panel{W: w, H: h, Index: "0", Focused: a.focus == pPreview, Body: body,
+	p := Panel{W: w, H: h, Index: "0", Focused: a.focus == pDetail, Body: body,
 		Total: len(a.gh.preview.lines), Offset: a.gh.preview.offset, Footer: a.gh.preview.percent(rows)}
 	if it := a.ghItem(); it != nil && it.Kind == gh.PR {
 		p.Tabs = []string{"Overview", "Diff"}
@@ -745,41 +741,10 @@ func (a *App) previewPanelView(w, h int) string {
 
 // ─── Keys ───────────────────────────────────────────────────────────────────
 
+// ghKey handles GitHub mode's own keys: sections, search, the diff toggle
+// and the selected item's actions.
 func (a *App) ghKey(key string) (bool, tea.Cmd) {
 	switch key {
-	case "1":
-		a.setFocus(pPRs)
-		return true, a.ghEnsureDetail()
-	case "2":
-		a.setFocus(pIssues)
-		return true, a.ghEnsureDetail()
-	case "0", "enter":
-		if a.focus != pPreview {
-			a.setFocus(pPreview)
-			return true, nil
-		}
-	case "esc":
-		if a.focus == pPreview {
-			a.focus = a.back
-			return true, nil
-		}
-		if a.filterText() != "" {
-			a.setFilter("")
-		}
-		return true, a.ghEnsureDetail()
-	case "h", "left", "l", "right":
-		switch a.focus {
-		case pPreview:
-			a.focus = a.back
-		case pPRs:
-			a.focus = pIssues
-		default:
-			a.focus = pPRs
-		}
-		return true, a.ghEnsureDetail()
-	case "/":
-		a.startFilter()
-		return true, nil
 	case "[", "]":
 		p := a.previewPanel()
 		n := len(a.gh.sections(p.kind))
@@ -804,15 +769,7 @@ func (a *App) ghKey(key string) (bool, tea.Cmd) {
 	}
 
 	if it := a.ghItem(); it != nil {
-		if handled, c := a.ghItemKey(key, *it); handled {
-			return true, c
-		}
-	}
-	if a.focus == pPreview {
-		return pagerKey(key, &a.gh.preview, a.panelRows(pPreview)), nil
-	}
-	if l := a.listFor(a.focus); l != nil && navKey(key, l, a.panelRows(a.focus)) {
-		return true, a.ghEnsureDetail()
+		return a.ghItemKey(key, *it)
 	}
 	return false, nil
 }
