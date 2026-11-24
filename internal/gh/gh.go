@@ -76,9 +76,7 @@ func run(args ...string) ([]byte, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		if i := strings.IndexByte(msg, '\n'); i >= 0 {
-			msg = msg[:i]
-		}
+		msg, _, _ = strings.Cut(msg, "\n")
 		return nil, errors.New(msg)
 	}
 	return out.Bytes(), nil
@@ -252,8 +250,6 @@ type Detail struct {
 	ReviewRequests []string
 	Comments       []Comment
 	ChangedFiles   int
-	MergeState     string
-	Mergeable      string
 }
 
 type actor struct {
@@ -272,45 +268,47 @@ func (a actor) String() string {
 	return a.Name
 }
 
+type rawComment struct {
+	Author    actor     `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func comments(raw []rawComment) []Comment {
+	var out []Comment
+	for _, c := range raw {
+		out = append(out, Comment{Author: c.Author.String(), Body: c.Body, At: c.CreatedAt})
+	}
+	return out
+}
+
 // GetDetail loads the body, checks, reviews and comments for the preview.
 func GetDetail(it Item) (Detail, error) {
 	var d Detail
-	num := strconv.Itoa(it.Number)
 	if it.Kind == Issue {
-		out, err := run("issue", "view", num, "-R", it.Repo, "--json", "body,comments")
+		out, err := run("issue", "view", num(it), "-R", it.Repo, "--json", "body,comments")
 		if err != nil {
 			return d, err
 		}
 		var raw struct {
-			Body     string `json:"body"`
-			Comments []struct {
-				Author    actor     `json:"author"`
-				Body      string    `json:"body"`
-				CreatedAt time.Time `json:"createdAt"`
-			} `json:"comments"`
+			Body     string       `json:"body"`
+			Comments []rawComment `json:"comments"`
 		}
 		if err := json.Unmarshal(out, &raw); err != nil {
 			return d, err
 		}
-		d.Body = raw.Body
-		for _, c := range raw.Comments {
-			d.Comments = append(d.Comments, Comment{Author: c.Author.String(), Body: c.Body, At: c.CreatedAt})
-		}
+		d.Body, d.Comments = raw.Body, comments(raw.Comments)
 		return d, nil
 	}
-	out, err := run("pr", "view", num, "-R", it.Repo, "--json",
-		"body,comments,reviews,reviewRequests,statusCheckRollup,changedFiles,mergeStateStatus,mergeable")
+	out, err := run("pr", "view", num(it), "-R", it.Repo, "--json",
+		"body,comments,reviews,reviewRequests,statusCheckRollup,changedFiles")
 	if err != nil {
 		return d, err
 	}
 	var raw struct {
-		Body     string `json:"body"`
-		Comments []struct {
-			Author    actor     `json:"author"`
-			Body      string    `json:"body"`
-			CreatedAt time.Time `json:"createdAt"`
-		} `json:"comments"`
-		Reviews []struct {
+		Body     string       `json:"body"`
+		Comments []rawComment `json:"comments"`
+		Reviews  []struct {
 			Author      actor     `json:"author"`
 			State       string    `json:"state"`
 			SubmittedAt time.Time `json:"submittedAt"`
@@ -325,17 +323,12 @@ func GetDetail(it Item) (Detail, error) {
 			Conclusion   string `json:"conclusion"`
 			State        string `json:"state"`
 		} `json:"statusCheckRollup"`
-		ChangedFiles     int    `json:"changedFiles"`
-		MergeStateStatus string `json:"mergeStateStatus"`
-		Mergeable        string `json:"mergeable"`
+		ChangedFiles int `json:"changedFiles"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return d, err
 	}
-	d.Body, d.ChangedFiles, d.MergeState, d.Mergeable = raw.Body, raw.ChangedFiles, raw.MergeStateStatus, raw.Mergeable
-	for _, c := range raw.Comments {
-		d.Comments = append(d.Comments, Comment{Author: c.Author.String(), Body: c.Body, At: c.CreatedAt})
-	}
+	d.Body, d.ChangedFiles, d.Comments = raw.Body, raw.ChangedFiles, comments(raw.Comments)
 	latest := map[string]int{}
 	for _, r := range raw.Reviews {
 		if r.State == "COMMENTED" || r.State == "PENDING" {
@@ -364,7 +357,7 @@ func GetDetail(it Item) (Detail, error) {
 
 // Diff is the PR's patch.
 func Diff(it Item) (string, error) {
-	out, err := run("pr", "diff", strconv.Itoa(it.Number), "-R", it.Repo, "--color=never")
+	out, err := run("pr", "diff", num(it), "-R", it.Repo, "--color=never")
 	return string(out), err
 }
 
@@ -418,7 +411,7 @@ func Checkout(dir string, it Item) git.Result {
 	if branch == "" {
 		branch = "pr-" + num(it)
 	}
-	if _, err := git.Read(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+	if git.BranchExists(dir, branch) {
 		return git.Checkout(dir, branch)
 	}
 	if f := git.Run(dir, "fetch", "origin", "pull/"+num(it)+"/head:"+branch); f.Err != nil {

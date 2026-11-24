@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -58,9 +59,8 @@ func (a *App) localKey(key string) (bool, tea.Cmd) {
 			a.focus = a.back
 			return true, nil
 		}
-		if l := a.listFor(a.focus); l != nil && l.filter != "" {
-			a.filterInput = ""
-			a.applyFilter()
+		if a.filterText() != "" {
+			a.setFilter("")
 			return true, a.afterMove(a.focus)
 		}
 		return true, nil
@@ -111,10 +111,10 @@ func (a *App) localKey(key string) (bool, tea.Cmd) {
 			return true, c
 		}
 	case pMain:
-		return a.pagerKey(key, &a.main, a.panelRows(pMain)), nil
+		return pagerKey(key, &a.main, a.panelRows(pMain)), nil
 	}
 
-	if l := a.listFor(a.focus); l != nil && a.navKey(key, l, a.panelRows(a.focus)) {
+	if l := a.listFor(a.focus); l != nil && navKey(key, l, a.panelRows(a.focus)) {
 		return true, a.afterMove(a.focus)
 	}
 	return false, nil
@@ -149,23 +149,15 @@ func (a *App) reposKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 			return true, a.openShell(repo.Path)
 		}
 	case "S":
-		for i, m := range sortModes {
-			if m == a.sortMode || (a.sortMode == "" && i == 0) {
-				a.sortMode = sortModes[(i+1)%len(sortModes)]
-				break
-			}
-		}
-		if a.sortMode == "" {
-			a.sortMode = sortModes[1]
-		}
-		a.cfg.SortMode = a.sortMode
+		i := slices.Index(sortModes, a.cfg.SortMode)
+		a.cfg.SortMode = sortModes[(i+1)%len(sortModes)]
 		_ = a.cfg.Save()
 		keep := ""
 		if repo != nil {
 			keep = repo.Path
 		}
 		a.sortRepos(keep)
-		return true, a.flash("Sorted by "+a.sortMode, false)
+		return true, a.flash("Sorted by "+a.cfg.SortMode, false)
 	case "y":
 		if repo != nil {
 			return true, a.copy(repo.Path)
@@ -249,7 +241,6 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		return false, nil
 	}
 	dir := repo.Path
-	i := a.branchesL.sel()
 	switch key {
 	case "[", "]":
 		d := 1
@@ -265,17 +256,9 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		a.openNewBranch(dir)
 		return true, nil
 	}
-	if i < 0 {
+	name, ok := a.selectedRef()
+	if !ok {
 		return false, nil
-	}
-	var name string
-	switch a.branchTab {
-	case 0:
-		name = a.cur.branches[i].Name
-	case 1:
-		name = a.cur.remotes[i].Name
-	default:
-		name = a.cur.tags[i].Name
 	}
 	switch key {
 	case "space":
@@ -288,7 +271,7 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		}
 	case "d":
 		if a.branchTab == 0 {
-			return true, a.confirmDeleteBranch(dir, a.cur.branches[i])
+			return true, a.confirmDeleteBranch(dir, a.cur.branches[a.branchesL.sel()])
 		}
 		return true, nil
 	case "y":
@@ -367,26 +350,20 @@ func (a *App) pullAll() tea.Cmd {
 	if len(repos) == 0 {
 		return a.flash("Nothing to pull: no repo has an upstream", true)
 	}
-	label := fmt.Sprintf("Pulling %d repos", len(repos))
-	return tea.Sequence(
-		func() tea.Msg { return busyMsg{1, label} },
-		func() tea.Msg {
-			results := make([]git.Result, len(repos))
-			var wg sync.WaitGroup
-			sem := make(chan struct{}, 6)
-			for i, r := range repos {
-				wg.Add(1)
-				sem <- struct{}{}
-				go func(i int, r git.Repo) {
-					defer func() { <-sem; wg.Done() }()
-					results[i] = git.PullFFOnly(r.Path)
-				}(i, r)
-			}
-			wg.Wait()
-			return pullAllMsg{results}
-		},
-		func() tea.Msg { return busyMsg{-1, ""} },
-	)
+	return a.withBusy(fmt.Sprintf("Pulling %d repos", len(repos)), func() tea.Msg {
+		results := make([]git.Result, len(repos))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 6)
+		for i, r := range repos {
+			sem <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-sem }()
+				results[i] = git.PullFFOnly(r.Path)
+			})
+		}
+		wg.Wait()
+		return pullAllMsg{results}
+	})
 }
 
 func (a *App) onPullAll(msg pullAllMsg) tea.Cmd {
@@ -434,12 +411,11 @@ func (a *App) confirmDelete(r git.Repo) {
 	body = append(body, "", "The directory is removed from disk.")
 	root := a.cfg.RepoRoot()
 	path := r.Path
-	a.confirm("Delete "+r.Name+"?", body, func() tea.Msg {
+	a.confirmDanger("Delete "+r.Name+"?", body, func() tea.Msg {
 		err := git.Remove(root, path)
 		return resultMsg{res: git.Result{Dir: filepath.Dir(path), Cmd: "rm -rf " + config.TildePath(path), Err: err},
 			ok: "Deleted " + filepath.Base(path), rescan: true}
 	})
-	a.modal.(*confirmModal).danger = true
 }
 
 func (a *App) confirmDiscard(dir string, row fileRow) {
@@ -448,28 +424,27 @@ func (a *App) confirmDiscard(dir string, row fileRow) {
 		what += "/ (" + plural(len(row.files), "file") + ")"
 	}
 	files := row.files
-	a.confirm("Discard changes?", []string{"Throw away all changes to", T.Bold.Render(what), "", T.Dim.Render("Staged and unstaged. This can't be undone.")},
+	body := []string{"Throw away all changes to", T.Bold.Render(what), "",
+		T.Dim.Render("Staged and unstaged. This can't be undone.")}
+	a.confirmDanger("Discard changes?", body,
 		a.run("Discarding", true, "Discarded "+row.path, func() git.Result { return git.Discard(dir, files) }))
-	a.modal.(*confirmModal).danger = true
 }
 
 func (a *App) confirmDeleteBranch(dir string, b git.Branch) tea.Cmd {
 	if b.Head {
 		return a.flash("You can't delete the branch you're on", true)
 	}
-	a.confirm("Delete branch?", []string{T.Bold.Render(b.Name), "", T.Dim.Render("Uses git branch -d, so unmerged work is safe.")},
-		a.run("Deleting branch", true, "Deleted "+b.Name, func() git.Result { return git.DeleteBranch(dir, b.Name, false) }))
+	body := []string{T.Bold.Render(b.Name), "",
+		T.Dim.Render("Uses git branch -d, so unmerged work is safe.")}
+	del := func() git.Result { return git.DeleteBranch(dir, b.Name) }
+	a.confirm("Delete branch?", body, a.run("Deleting branch", true, "Deleted "+b.Name, del))
 	return nil
 }
 
 func (a *App) openCommit(repo *git.Repo) tea.Cmd {
 	staged := 0
 	if a.cur != nil {
-		for _, f := range a.cur.status.Files {
-			if f.HasStaged() {
-				staged++
-			}
-		}
+		staged = a.cur.status.Staged()
 	}
 	if staged == 0 {
 		return a.flash("Nothing staged. Space stages a file, a stages everything", true)
@@ -521,44 +496,39 @@ func (a *App) openClone() {
 }
 
 func (a *App) cloneAll(urls []string, root string) tea.Cmd {
-	label := "Cloning " + plural(len(urls), "repo")
-	return tea.Sequence(
-		func() tea.Msg { return busyMsg{1, label} },
-		func() tea.Msg {
-			var first string
-			var failed []string
-			var last git.Result
-			for _, u := range urls {
-				dest, slug, err := git.CloneDest(root, u)
-				if err != nil {
-					failed = append(failed, err.Error())
-					continue
-				}
-				if dirExists(dest) {
-					failed = append(failed, config.TildePath(dest)+" already exists")
-					if first == "" {
-						first = dest
-					}
-					continue
-				}
-				_ = os.MkdirAll(filepath.Dir(dest), 0o755)
-				if slug != "" {
-					last = git.CloneGH(slug, dest)
-				} else {
-					last = git.Clone(u, dest)
-				}
-				if last.Err != nil {
-					failed = append(failed, last.Err.Error())
-					continue
-				}
+	return a.withBusy("Cloning "+plural(len(urls), "repo"), func() tea.Msg {
+		var first string
+		var failed []string
+		var last git.Result
+		for _, u := range urls {
+			dest, slug, err := git.CloneDest(root, u)
+			if err != nil {
+				failed = append(failed, err.Error())
+				continue
+			}
+			if dirExists(dest) {
+				failed = append(failed, config.TildePath(dest)+" already exists")
 				if first == "" {
 					first = dest
 				}
+				continue
 			}
-			return clonedMsg{first: first, failed: failed, n: len(urls), last: last}
-		},
-		func() tea.Msg { return busyMsg{-1, ""} },
-	)
+			_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+			if slug != "" {
+				last = git.CloneGH(slug, dest)
+			} else {
+				last = git.Clone(u, dest)
+			}
+			if last.Err != nil {
+				failed = append(failed, last.Err.Error())
+				continue
+			}
+			if first == "" {
+				first = dest
+			}
+		}
+		return clonedMsg{first: first, failed: failed, n: len(urls), last: last}
+	})
 }
 
 type clonedMsg struct {
@@ -581,7 +551,7 @@ func (a *App) onCloned(msg clonedMsg) tea.Cmd {
 		c = a.flash("Cloned "+plural(msg.n, "repo"), false)
 	}
 	if msg.first != "" {
-		a.gh.selectAfterScan = msg.first
+		a.selectAfterScan = msg.first
 		a.touch(msg.first)
 	}
 	return tea.Batch(c, a.scan())

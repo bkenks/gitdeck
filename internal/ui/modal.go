@@ -8,7 +8,6 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
@@ -29,7 +28,7 @@ func box(w int, title string, body []string, hint string, accent *lipgloss.Style
 	inner := w - 4
 	lines := []string{""}
 	for _, l := range body {
-		for _, wl := range strings.Split(ansi.Wrap(l, inner, " "), "\n") {
+		for _, wl := range wrap(l, inner) {
 			lines = append(lines, "  "+wl)
 		}
 	}
@@ -59,6 +58,11 @@ type confirmModal struct {
 
 func (a *App) confirm(title string, body []string, onYes tea.Cmd) {
 	a.modal = &confirmModal{title: title, body: body, onYes: onYes}
+}
+
+// confirmDanger is confirm in the red of something that can't be undone.
+func (a *App) confirmDanger(title string, body []string, onYes tea.Cmd) {
+	a.modal = &confirmModal{title: title, body: body, onYes: onYes, danger: true}
 }
 
 func (m *confirmModal) update(msg tea.Msg, a *App) (bool, tea.Cmd) {
@@ -276,10 +280,7 @@ func (m *menuModal) view(a *App) string {
 		body = append(body, renderRow(row, w-4, sel))
 	}
 	lines := append([]string{""}, body...)
-	lines = append(lines, "", keyHint("enter", "Run", "esc", "Cancel"))
-	for i := range lines {
-		lines[i] = " " + lines[i]
-	}
+	lines = indent(append(lines, "", keyHint("enter", "Run", "esc", "Cancel")))
 	return Panel{W: w, H: len(lines) + 2, Title: m.title, Focused: true, Body: lines}.Render()
 }
 
@@ -295,19 +296,11 @@ func (m *helpModal) update(msg tea.Msg, a *App) (bool, tea.Cmd) {
 	if !ok {
 		return false, nil
 	}
-	h := a.h - 8
 	switch k.String() {
 	case "esc", "q", "?", "ctrl+c":
 		return true, nil
-	case "j", "down":
-		m.p.scroll(1, h)
-	case "k", "up":
-		m.p.scroll(-1, h)
-	case "ctrl+d", "pgdown", "space":
-		m.p.scroll(h/2, h)
-	case "ctrl+u", "pgup":
-		m.p.scroll(-h/2, h)
 	}
+	pagerKey(k.String(), &m.p, a.h-8)
 	return false, nil
 }
 

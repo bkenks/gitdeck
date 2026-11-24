@@ -10,6 +10,9 @@ import (
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
 
+// P is a plain-text seg.
+func P(text string) Seg { return S(text, T.Fg) }
+
 func TestPanelIsExactlyItsSize(t *testing.T) {
 	for _, w := range []int{10, 33, 80} {
 		for _, h := range []int{3, 7, 20} {

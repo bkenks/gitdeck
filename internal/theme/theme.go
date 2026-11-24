@@ -8,6 +8,7 @@
 package theme
 
 import (
+	"hash/fnv"
 	"image/color"
 	"strconv"
 	"strings"
@@ -81,7 +82,7 @@ type Theme struct {
 
 	// Semantic colors. Plain ANSI, so they follow the terminal theme.
 	Red, Green, Yellow, Blue, Magenta, Cyan lipgloss.Style
-	Bold, Dim, Italic                       lipgloss.Style
+	Bold, Dim                               lipgloss.Style
 
 	// Authors is the rotation used to tell commit authors apart.
 	Authors []lipgloss.Style
@@ -115,7 +116,6 @@ func Build(cfg Config) Theme {
 		Cyan:            fg(lipgloss.Cyan),
 		Bold:            plain.Bold(true),
 		Dim:             plain.Faint(true),
-		Italic:          plain.Italic(true),
 	}
 	t.Authors = []lipgloss.Style{t.Cyan, t.Magenta, t.Yellow, t.Green, t.Blue, t.Red,
 		fg(lipgloss.BrightCyan), fg(lipgloss.BrightMagenta), fg(lipgloss.BrightYellow),
@@ -204,8 +204,7 @@ func Color(s string) color.Color {
 // which ANSI colors read well on which is up to the terminal theme, and the
 // default foreground is the one color every theme makes readable.
 func Over(cell, sel lipgloss.Style) lipgloss.Style {
-	bg := sel.GetBackground()
-	if _, none := bg.(lipgloss.NoColor); !none {
+	if bg := sel.GetBackground(); !isNoColor(bg) {
 		// Faint text washes out on a colored bar too.
 		cell = cell.UnsetForeground().Background(bg).Faint(false)
 	}
@@ -235,12 +234,9 @@ func isNoColor(c color.Color) bool {
 
 // Author picks a stable color for a commit author.
 func (t Theme) Author(name string) lipgloss.Style {
-	var h uint32 = 2166136261
-	for i := 0; i < len(name); i++ {
-		h ^= uint32(name[i])
-		h *= 16777619
-	}
-	return t.Authors[int(h%uint32(len(t.Authors)))]
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return t.Authors[int(h.Sum32()%uint32(len(t.Authors)))]
 }
 
 // Hue maps an arbitrary hex color (a GitHub label, say) onto the nearest

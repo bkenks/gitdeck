@@ -132,18 +132,23 @@ func (r Repo) Namespace() string {
 
 // Stats is a repo's local state, cheap enough to load for every repo.
 type Stats struct {
-	Branch      string
-	Detached    bool
-	Upstream    bool
-	Ahead       int
-	Behind      int
-	Dirty       int
-	Branches    int
-	Unpushed    int // commits on local branches that no remote has
-	LastCommit  time.Time
-	Slug        string // owner/name when origin is on GitHub
-	RemoteURL   string
-	DefaultHead string
+	Branch     string
+	Upstream   bool
+	Ahead      int
+	Behind     int
+	Dirty      int
+	Branches   int
+	Unpushed   int // commits on local branches that no remote has
+	LastCommit time.Time
+	Slug       string // owner/name when origin is on GitHub
+	RemoteURL  string
+}
+
+// ApplyStatus copies the fields a status read refreshes.
+func (s *Stats) ApplyStatus(st Status) {
+	s.Branch = st.Branch
+	s.Upstream, s.Ahead, s.Behind = st.Upstream != "", st.Ahead, st.Behind
+	s.Dirty = len(st.Files)
 }
 
 // Scan walks root and returns every repo under it. Walking stops at a repo,
@@ -209,37 +214,28 @@ func Toplevel(dir string) string {
 func LoadStats(dir string) Stats {
 	var s Stats
 	var wg sync.WaitGroup
-	wg.Add(4)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if st, err := GetStatus(dir); err == nil {
-			s.Branch, s.Detached = st.Branch, st.Detached
-			s.Upstream, s.Ahead, s.Behind = st.Upstream != "", st.Ahead, st.Behind
-			s.Dirty = len(st.Files)
+			s.ApplyStatus(st)
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		if out, err := Read(dir, "for-each-ref", "--format=%(refname)", "refs/heads"); err == nil {
 			s.Branches = countLines(out)
 		}
 		if out, err := Read(dir, "rev-list", "--count", "--branches", "--not", "--remotes"); err == nil {
 			s.Unpushed, _ = strconv.Atoi(strings.TrimSpace(out))
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		if out, err := Read(dir, "log", "-1", "--format=%ct"); err == nil {
-			if n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64); err == nil {
-				s.LastCommit = time.Unix(n, 0)
-			}
+			s.LastCommit = unix(out)
 		}
-	}()
-	go func() {
-		defer wg.Done()
+	})
+	wg.Go(func() {
 		s.RemoteURL = RemoteURL(dir)
 		s.Slug = GitHubSlug(s.RemoteURL)
-	}()
+	})
 	wg.Wait()
 	return s
 }
@@ -297,10 +293,9 @@ func (f File) HasUnstaged() bool { return f.Y != ' ' || f.X == '?' }
 func (f File) Conflicted() bool {
 	return f.X == 'U' || f.Y == 'U' || (f.X == 'A' && f.Y == 'A') || (f.X == 'D' && f.Y == 'D')
 }
-func (f File) Code() string        { return string([]byte{f.X, f.Y}) }
-func (f File) FullyStaged() bool   { return f.HasStaged() && !f.HasUnstaged() }
-func (f File) NewInIndex() bool    { return f.X == 'A' }
-func (f File) DeletedInTree() bool { return f.Y == 'D' }
+func (f File) Code() string      { return string([]byte{f.X, f.Y}) }
+func (f File) FullyStaged() bool { return f.HasStaged() && !f.HasUnstaged() }
+func (f File) NewInIndex() bool  { return f.X == 'A' }
 
 type Status struct {
 	Branch   string
@@ -310,6 +305,17 @@ type Status struct {
 	Detached bool
 	Unborn   bool
 	Files    []File
+}
+
+// Staged counts the files with changes in the index.
+func (st Status) Staged() int {
+	n := 0
+	for _, f := range st.Files {
+		if f.HasStaged() {
+			n++
+		}
+	}
+	return n
 }
 
 // GetStatus parses `git status --porcelain=v1 -b -z`.
@@ -403,7 +409,6 @@ type Branch struct {
 	Gone     bool
 	Date     time.Time
 	Subject  string
-	Remote   bool
 }
 
 func Branches(dir string) ([]Branch, error) {
@@ -439,7 +444,7 @@ func RemoteBranches(dir string) ([]Branch, error) {
 		if len(f) < 4 || f[3] != "" || !strings.Contains(f[0], "/") {
 			continue
 		}
-		bs = append(bs, Branch{Name: f[0], Date: unix(f[1]), Subject: f[2], Remote: true})
+		bs = append(bs, Branch{Name: f[0], Date: unix(f[1]), Subject: f[2]})
 	}
 	return bs, nil
 }
@@ -498,7 +503,8 @@ func Log(dir string, limit int) ([]Commit, error) {
 		return nil, err
 	}
 	unpushed := map[string]bool{}
-	if up, err := Read(dir, "rev-list", "HEAD", "--not", "--remotes"); err == nil {
+	// The log's unpushed commits are always within rev-list's first limit lines.
+	if up, err := Read(dir, "rev-list", "-n", strconv.Itoa(limit), "HEAD", "--not", "--remotes"); err == nil {
 		for _, h := range strings.Fields(up) {
 			unpushed[h] = true
 		}
@@ -585,23 +591,16 @@ func Graph(dir, ref string, n int) (string, error) {
 
 // ─── Actions ────────────────────────────────────────────────────────────────
 
-func Stage(dir, path string) Result    { return Run(dir, "add", "-A", "--", path) }
-func StageAll(dir string) Result       { return Run(dir, "add", "-A") }
-func UnstageAll(dir string) Result     { return Run(dir, "reset", "-q") }
-func CommitMsg(dir, msg string) Result { return Run(dir, "commit", "-m", msg) }
-func Checkout(dir, ref string) Result  { return Run(dir, "checkout", ref) }
-func NewBranch(dir, n string) Result   { return Run(dir, "checkout", "-b", n) }
-func DeleteBranch(dir, n string, force bool) Result {
-	flag := "-d"
-	if force {
-		flag = "-D"
-	}
-	return Run(dir, "branch", flag, n)
-}
+func Stage(dir, path string) Result     { return Run(dir, "add", "-A", "--", path) }
+func StageAll(dir string) Result        { return Run(dir, "add", "-A") }
+func UnstageAll(dir string) Result      { return Run(dir, "reset", "-q") }
+func CommitMsg(dir, msg string) Result  { return Run(dir, "commit", "-m", msg) }
+func Checkout(dir, ref string) Result   { return Run(dir, "checkout", ref) }
+func NewBranch(dir, n string) Result    { return Run(dir, "checkout", "-b", n) }
+func DeleteBranch(dir, n string) Result { return Run(dir, "branch", "-d", n) }
 func Fetch(dir string) Result           { return Run(dir, "fetch", "--all", "--prune") }
 func Pull(dir string) Result            { return Run(dir, "pull") }
 func PullFFOnly(dir string) Result      { return Run(dir, "pull", "--ff-only") }
-func StashPush(dir, msg string) Result  { return stashPush(dir, msg) }
 func StashApply(dir, ref string) Result { return Run(dir, "stash", "apply", ref) }
 func StashPop(dir, ref string) Result   { return Run(dir, "stash", "pop", ref) }
 func StashDrop(dir, ref string) Result  { return Run(dir, "stash", "drop", ref) }
@@ -610,7 +609,7 @@ func CloneGH(slug, dest string) Result {
 	return RunCmd(filepath.Dir(dest), "gh", "repo", "clone", slug, dest)
 }
 
-func stashPush(dir, msg string) Result {
+func StashPush(dir, msg string) Result {
 	args := []string{"stash", "push", "--include-untracked"}
 	if msg != "" {
 		args = append(args, "-m", msg)
@@ -634,10 +633,16 @@ func CheckoutRemote(dir, remoteRef string) Result {
 	if i := strings.Index(remoteRef, "/"); i >= 0 {
 		local = remoteRef[i+1:]
 	}
-	if _, err := Read(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+local); err == nil {
+	if BranchExists(dir, local) {
 		return Run(dir, "checkout", local)
 	}
 	return Run(dir, "checkout", "-b", local, "--track", remoteRef)
+}
+
+// BranchExists reports whether a local branch exists.
+func BranchExists(dir, name string) bool {
+	_, err := Read(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+	return err == nil
 }
 
 // Push pushes, setting an upstream on origin the first time.

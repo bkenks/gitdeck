@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -83,23 +84,33 @@ func (a *App) onScanned(msg scannedMsg) tea.Cmd {
 	} else if a.opts.Cwd != "" {
 		prev = a.opts.Cwd
 	}
-	if a.gh.selectAfterScan != "" {
-		prev, a.gh.selectAfterScan = a.gh.selectAfterScan, ""
+	if a.selectAfterScan != "" {
+		prev, a.selectAfterScan = a.selectAfterScan, ""
 	}
 	old := map[string]git.Repo{}
 	for _, r := range a.repos {
 		old[r.Path] = r
 	}
 	a.repos = msg.repos
-	var paths []string
+	// Repos already on screen keep their stats; R reloads them all.
+	var unloaded []string
 	for i := range a.repos {
 		if o, ok := old[a.repos[i].Path]; ok && o.Loaded {
 			a.repos[i].Stats, a.repos[i].Loaded = o.Stats, true
+		} else {
+			unloaded = append(unloaded, a.repos[i].Path)
 		}
-		paths = append(paths, a.repos[i].Path)
 	}
 	a.sortRepos(prev)
-	return tea.Batch(a.loadAllStats(paths), a.onRepoCursor(), a.syncMain())
+	return tea.Batch(a.loadAllStats(unloaded), a.onRepoCursor(), a.syncMain())
+}
+
+func (a *App) repoPaths() []string {
+	paths := make([]string, len(a.repos))
+	for i, r := range a.repos {
+		paths[i] = r.Path
+	}
+	return paths
 }
 
 func (a *App) loadAllStats(paths []string) tea.Cmd {
@@ -112,15 +123,14 @@ func (a *App) loadAllStats(paths []string) tea.Cmd {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 8)
 		for _, p := range paths {
-			wg.Add(1)
 			sem <- struct{}{}
-			go func(p string) {
-				defer func() { <-sem; wg.Done() }()
+			wg.Go(func() {
+				defer func() { <-sem }()
 				s := git.LoadStats(p)
 				mu.Lock()
 				out[p] = s
 				mu.Unlock()
-			}(p)
+			})
 		}
 		wg.Wait()
 		return out
@@ -153,19 +163,20 @@ func (a *App) loadRepo(path string) tea.Cmd {
 	return func() tea.Msg {
 		d := &repoData{path: path, loaded: true}
 		var wg sync.WaitGroup
-		wg.Add(6)
-		go func() { defer wg.Done(); d.status, d.err = git.GetStatus(path) }()
-		go func() { defer wg.Done(); d.branches, _ = git.Branches(path) }()
-		go func() { defer wg.Done(); d.remotes, _ = git.RemoteBranches(path) }()
-		go func() { defer wg.Done(); d.tags, _ = git.Tags(path) }()
-		go func() { defer wg.Done(); d.commits, _ = git.Log(path, 300) }()
-		go func() { defer wg.Done(); d.stashes, _ = git.Stashes(path) }()
+		wg.Go(func() { d.status, d.err = git.GetStatus(path) })
+		wg.Go(func() { d.branches, _ = git.Branches(path) })
+		wg.Go(func() { d.remotes, _ = git.RemoteBranches(path) })
+		wg.Go(func() { d.tags, _ = git.Tags(path) })
+		wg.Go(func() { d.commits, _ = git.Log(path, 300) })
+		wg.Go(func() { d.stashes, _ = git.Stashes(path) })
 		wg.Wait()
 		return repoMsg{d}
 	}
 }
 
-// onRepoCursor loads the detail panels when the selected repo changes.
+// onRepoCursor clears the detail panels when the selected repo changes and
+// schedules their load. Loads are debounced so holding j through the repo
+// list doesn't load every repo it passes.
 func (a *App) onRepoCursor() tea.Cmd {
 	r := a.selectedRepo()
 	if r == nil {
@@ -183,7 +194,17 @@ func (a *App) onRepoCursor() tea.Cmd {
 	a.filesL.filter, a.branchesL.filter, a.commitsL.filter, a.stashL.filter = "", "", "", ""
 	a.collapsed = map[string]bool{}
 	a.rebuildDetail()
-	return tea.Batch(a.loadRepo(r.Path), a.ghBranchPRs(r))
+	path := r.Path
+	a.repoPending = path
+	return tea.Tick(35*time.Millisecond, func(time.Time) tea.Msg { return repoDebounceMsg{path} })
+}
+
+func (a *App) onRepoDebounce(path string) tea.Cmd {
+	if path != a.repoPending {
+		return nil
+	}
+	a.repoPending = ""
+	return tea.Batch(a.loadRepo(path), a.ghBranchPRs(a.selectedRepo()))
 }
 
 func (a *App) onRepo(d *repoData) tea.Cmd {
@@ -193,10 +214,8 @@ func (a *App) onRepo(d *repoData) tea.Cmd {
 	a.cur = d
 	for i := range a.repos {
 		if a.repos[i].Path == d.path && a.repos[i].Loaded {
-			s := &a.repos[i].Stats
-			s.Branch, s.Detached = d.status.Branch, d.status.Detached
-			s.Upstream, s.Ahead, s.Behind = d.status.Upstream != "", d.status.Ahead, d.status.Behind
-			s.Dirty = len(d.status.Files)
+			a.repos[i].Stats.ApplyStatus(d.status)
+			a.repos[i].Stats.Branches = len(d.branches)
 		}
 	}
 	a.rebuildDetail()
@@ -251,14 +270,14 @@ func (a *App) recency(r git.Repo) time.Time {
 var sortModes = []string{"recent", "name", "namespace"}
 
 func (a *App) sortRepos(keep string) {
-	mode := a.sortMode
+	mode := a.cfg.SortMode
 	sort.SliceStable(a.repos, func(i, j int) bool {
 		ri, rj := a.repos[i], a.repos[j]
 		if ri.Cwd != rj.Cwd {
 			return ri.Cwd
 		}
 		switch mode {
-		case "name", "name-asc":
+		case "name":
 			return strings.ToLower(ri.Name) < strings.ToLower(rj.Name)
 		case "namespace":
 			return strings.ToLower(ri.Key) < strings.ToLower(rj.Key)
@@ -284,10 +303,7 @@ func (a *App) refilterRepos() {
 func (a *App) touch(path string) {
 	a.state.LastUsed[path] = time.Now()
 	// Save a copy: the map keeps changing on the UI goroutine.
-	snap := config.State{LastUsed: make(map[string]time.Time, len(a.state.LastUsed))}
-	for k, v := range a.state.LastUsed {
-		snap.LastUsed[k] = v
-	}
+	snap := config.State{LastUsed: maps.Clone(a.state.LastUsed)}
 	go snap.Save()
 }
 
@@ -310,14 +326,8 @@ func (a *App) repoRow(i int) Row {
 	if s.Dirty > 0 {
 		right = append(right, S("~"+itoa(s.Dirty)+" ", T.Unstaged))
 	}
-	if s.Ahead > 0 {
-		right = append(right, S("↑"+itoa(s.Ahead), T.Yellow))
-	}
-	if s.Behind > 0 {
-		right = append(right, S("↓"+itoa(s.Behind), T.Yellow))
-	}
-	if s.Ahead > 0 || s.Behind > 0 {
-		right = append(right, S(" ", T.Fg))
+	if ab := aheadBehind(s.Ahead, s.Behind); ab != "" {
+		right = append(right, S(ab+" ", T.Yellow))
 	}
 	right = append(right, S(s.Branch, T.Dim))
 	if s.Dirty == 0 && s.Ahead == 0 && s.Behind == 0 && s.Upstream {
@@ -582,20 +592,41 @@ func (a *App) branchRow(i int) Row {
 	case b.Ahead == 0 && b.Behind == 0:
 		left = append(left, S(" ✓", T.Green))
 	default:
-		t := " "
-		if b.Ahead > 0 {
-			t += "↑" + itoa(b.Ahead)
-		}
-		if b.Behind > 0 {
-			t += "↓" + itoa(b.Behind)
-		}
-		left = append(left, S(t, T.Yellow))
+		left = append(left, S(" "+aheadBehind(b.Ahead, b.Behind), T.Yellow))
 	}
 	var right []Seg
 	if pr, ok := a.gh.branchPR(a.selectedRepo(), b.Name); ok {
 		right = append(right, prBadge(pr)...)
 	}
 	return Row{Left: left, Right: right}
+}
+
+// aheadBehind is the compact "↑2↓1" of a branch against its upstream.
+func aheadBehind(ahead, behind int) string {
+	s := ""
+	if ahead > 0 {
+		s += "↑" + itoa(ahead)
+	}
+	if behind > 0 {
+		s += "↓" + itoa(behind)
+	}
+	return s
+}
+
+// selectedRef is the name under the cursor in the branches panel's tab.
+func (a *App) selectedRef() (string, bool) {
+	i := a.branchesL.sel()
+	if a.cur == nil || i < 0 {
+		return "", false
+	}
+	switch a.branchTab {
+	case 0:
+		return a.cur.branches[i].Name, true
+	case 1:
+		return a.cur.remotes[i].Name, true
+	default:
+		return a.cur.tags[i].Name, true
+	}
 }
 
 func prBadge(pr gh.BranchPR) []Seg {
@@ -661,55 +692,11 @@ func (a *App) wantMain() (key, title string, load func() []string) {
 			return splitANSI(out)
 		}
 	case pFiles:
-		r := a.selectedFileRow()
-		if r == nil {
-			return "files-empty:" + dir, "Status", func() []string {
-				return []string{T.Dim.Render("Working tree clean.")}
-			}
-		}
-		f, isDir := r.file, r.dir
-		if isDir {
-			f = git.File{Path: r.path, X: ' ', Y: 'M'}
-		}
-		title := "Unstaged changes"
-		switch {
-		case !isDir && f.FullyStaged():
-			title = "Staged changes"
-		case !isDir && f.HasStaged() && f.HasUnstaged():
-			title = "Changes"
-		case isDir:
-			title = "Diff"
-		}
-		return "file:" + dir + ":" + r.path + ":" + f.Code(), title, func() []string {
-			staged, unstaged := git.FileDiff(dir, f, isDir)
-			var lines []string
-			if unstaged != "" {
-				lines = append(lines, colorDiff(unstaged)...)
-			}
-			if staged != "" {
-				if len(lines) > 0 {
-					lines = append(lines, "", T.Green.Bold(true).Render("── Staged ──"), "")
-				}
-				lines = append(lines, colorDiff(staged)...)
-			}
-			if len(lines) == 0 {
-				return []string{T.Dim.Render("No textual changes.")}
-			}
-			return lines
-		}
+		return a.fileMain(dir)
 	case pBranches:
-		i := a.branchesL.sel()
-		if i < 0 {
+		ref, ok := a.selectedRef()
+		if !ok {
 			return "", "", nil
-		}
-		var ref string
-		switch a.branchTab {
-		case 0:
-			ref = a.cur.branches[i].Name
-		case 1:
-			ref = a.cur.remotes[i].Name
-		default:
-			ref = a.cur.tags[i].Name
 		}
 		return "ref:" + dir + ":" + ref, "Log", func() []string {
 			out, err := git.Graph(dir, ref, 200)
@@ -746,6 +733,46 @@ func (a *App) wantMain() (key, title string, load func() []string) {
 		}
 	}
 	return "", "", nil
+}
+
+// fileMain is the main panel for the selected file or directory: its diff.
+func (a *App) fileMain(dir string) (key, title string, load func() []string) {
+	r := a.selectedFileRow()
+	if r == nil {
+		return "files-empty:" + dir, "Status", func() []string {
+			return []string{T.Dim.Render("Working tree clean.")}
+		}
+	}
+	f, isDir := r.file, r.dir
+	if isDir {
+		f = git.File{Path: r.path, X: ' ', Y: 'M'}
+	}
+	title = "Unstaged changes"
+	switch {
+	case !isDir && f.FullyStaged():
+		title = "Staged changes"
+	case !isDir && f.HasStaged() && f.HasUnstaged():
+		title = "Changes"
+	case isDir:
+		title = "Diff"
+	}
+	return "file:" + dir + ":" + r.path + ":" + f.Code(), title, func() []string {
+		staged, unstaged := git.FileDiff(dir, f, isDir)
+		var lines []string
+		if unstaged != "" {
+			lines = append(lines, colorDiff(unstaged)...)
+		}
+		if staged != "" {
+			if len(lines) > 0 {
+				lines = append(lines, "", T.Green.Bold(true).Render("── Staged ──"), "")
+			}
+			lines = append(lines, colorDiff(staged)...)
+		}
+		if len(lines) == 0 {
+			return []string{T.Dim.Render("No textual changes.")}
+		}
+		return lines
+	}
 }
 
 // syncMain schedules a main panel load when the selection changed. Loads
@@ -900,8 +927,8 @@ func (a *App) localPanel(p pane, w, h int) string {
 		if root := a.cfg.RepoRoot(); root != "" {
 			pn.Title = "Repos " + T.Dim.Render(config.TildePath(root))
 		}
-		if a.sortMode != "" && a.sortMode != "recent" {
-			pn.Title += T.Dim.Render(" · " + a.sortMode)
+		if m := a.cfg.SortMode; m != "" && m != "recent" {
+			pn.Title += T.Dim.Render(" · " + m)
 		}
 		switch {
 		case a.scanning && len(a.repos) == 0:
@@ -913,21 +940,11 @@ func (a *App) localPanel(p pane, w, h int) string {
 		default:
 			pn.Body = renderList(&a.reposL, inner, rows, focused, a.repoRow)
 		}
-		pn.Footer, pn.Status = a.reposL.footer(), a.filterStatus(p, &a.reposL)
-		pn.Total, pn.Offset = a.reposL.len(), a.reposL.offset
 	case pFiles:
 		pn.Index, pn.Title = "2", "Files"
 		if a.cur != nil {
-			if n := len(a.cur.status.Files); n > 0 {
-				staged := 0
-				for _, f := range a.cur.status.Files {
-					if f.HasStaged() {
-						staged++
-					}
-				}
-				if staged > 0 {
-					pn.Title += T.Green.Render(" " + itoa(staged) + " staged")
-				}
+			if staged := a.cur.status.Staged(); staged > 0 {
+				pn.Title += T.Green.Render(" " + itoa(staged) + " staged")
 			}
 		}
 		if a.cur != nil && a.cur.loaded && len(a.fileRows) == 0 && a.filesL.filter == "" {
@@ -935,24 +952,17 @@ func (a *App) localPanel(p pane, w, h int) string {
 		} else {
 			pn.Body = renderList(&a.filesL, inner, rows, focused, a.fileRowView)
 		}
-		pn.Footer, pn.Status = a.filesL.footer(), a.filterStatus(p, &a.filesL)
-		pn.Total, pn.Offset = a.filesL.len(), a.filesL.offset
 	case pBranches:
 		pn.Index, pn.Tabs, pn.Tab = "3", branchTabs, a.branchTab
 		pn.Body = renderList(&a.branchesL, inner, rows, focused, a.branchRow)
-		pn.Footer, pn.Status = a.branchesL.footer(), a.filterStatus(p, &a.branchesL)
-		pn.Total, pn.Offset = a.branchesL.len(), a.branchesL.offset
 	case pCommits:
 		pn.Index, pn.Title = "4", "Commits"
 		pn.Body = renderList(&a.commitsL, inner, rows, focused, a.commitRow)
-		pn.Footer, pn.Status = a.commitsL.footer(), a.filterStatus(p, &a.commitsL)
-		pn.Total, pn.Offset = a.commitsL.len(), a.commitsL.offset
 	case pStash:
 		pn.Index, pn.Title = "5", "Stash"
 		pn.Body = renderList(&a.stashL, inner, rows, focused, a.stashRow)
-		pn.Footer, pn.Status = a.stashL.footer(), a.filterStatus(p, &a.stashL)
-		pn.Total, pn.Offset = a.stashL.len(), a.stashL.offset
 	}
+	a.listChrome(&pn, p, a.listFor(p))
 	return pn.Render()
 }
 
@@ -962,25 +972,20 @@ func (a *App) mainPanel(w, h int) string {
 	var body []string
 	if a.focus == pRepos || (a.focus == pMain && a.back == pRepos) {
 		pn.Title = "Repository"
-		body = append(body, a.repoSummary(inner-2)...)
-	}
-	for i := range body {
-		body[i] = " " + body[i]
+		body = indent(a.repoSummary(inner - 2))
 	}
 	rows -= len(body)
 	body = append(body, a.main.view(max(0, rows))...)
 	pn.Body = body
 	pn.Total, pn.Offset = len(a.main.lines), a.main.offset
-	if pn.Total > rows && rows > 0 {
-		pn.Footer = itoa(min(100, (a.main.offset+rows)*100/pn.Total)) + "%"
-	}
+	pn.Footer = a.main.percent(rows)
 	if a.cur == nil && len(a.repos) == 0 && !a.scanning {
-		pn.Body = a.welcome(inner)
+		pn.Body = a.welcome()
 	}
 	return pn.Render()
 }
 
-func (a *App) welcome(width int) []string {
+func (a *App) welcome() []string {
 	lines := []string{
 		"",
 		"  " + T.ActiveBorder.Render("◆ gitdeck"),

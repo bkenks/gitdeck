@@ -40,25 +40,24 @@ type detailData struct {
 	diff        []string
 	diffErr     error
 	diffLoading bool
+	version     int // bumped on every arrival, so the preview re-renders
 }
 
 type ghState struct {
-	cfg             config.GitHub
-	available       bool
-	user, userErr   string
-	prs, issues     ghPanel
-	data            map[string]*sectionData
-	details         map[string]*detailData
-	preview         pager
-	previewFor      string
-	showDiff        bool
-	search          map[gh.Kind]string
-	repoSlug        string
-	branchPRs       map[string]map[string]gh.BranchPR
-	branchPRsAt     map[string]time.Time
-	selectAfterScan string
-	version         int
-	pendingDetail   string
+	cfg           config.GitHub
+	available     bool
+	user, userErr string
+	prs, issues   ghPanel
+	data          map[string]*sectionData
+	details       map[string]*detailData
+	preview       pager
+	previewFor    string
+	showDiff      bool
+	search        map[gh.Kind]string
+	repoSlug      string
+	branchPRs     map[string]map[string]gh.BranchPR
+	branchPRsAt   map[string]time.Time
+	pendingDetail string
 }
 
 type (
@@ -157,11 +156,31 @@ func (g *ghState) items(p *ghPanel) []gh.Item {
 	return nil
 }
 
-func (g *ghState) refilter(prs bool) {
-	p := &g.issues
-	if prs {
-		p = &g.prs
+// section and detail get a cache entry, creating it if needed.
+func (g *ghState) section(key string) *sectionData {
+	d := g.data[key]
+	if d == nil {
+		d = &sectionData{}
+		g.data[key] = d
 	}
+	return d
+}
+
+func (g *ghState) detail(key string) *detailData {
+	d := g.details[key]
+	if d == nil {
+		d = &detailData{}
+		g.details[key] = d
+	}
+	return d
+}
+
+func (g *ghState) refilterAll() {
+	g.refilter(&g.prs)
+	g.refilter(&g.issues)
+}
+
+func (g *ghState) refilter(p *ghPanel) {
 	items := g.items(p)
 	p.list.refilter(len(items), func(i int) string {
 		it := items[i]
@@ -226,15 +245,10 @@ func (a *App) ghFetch(p *ghPanel, force bool) tea.Cmd {
 		return nil
 	}
 	key := dataKey(p.kind, s.query)
-	d := a.gh.data[key]
-	if d != nil && (d.loading || (!force && time.Since(d.at) < 3*time.Minute)) {
+	if d := a.gh.data[key]; d != nil && (d.loading || (!force && time.Since(d.at) < 3*time.Minute)) {
 		return nil
 	}
-	if d == nil {
-		d = &sectionData{}
-		a.gh.data[key] = d
-	}
-	d.loading = true
+	a.gh.section(key).loading = true
 	return fetchSection(p.kind, s.query, a.gh.cfg.Limit)
 }
 
@@ -246,17 +260,16 @@ func (a *App) ghEnsure() tea.Cmd {
 	}
 	if slug != a.gh.repoSlug {
 		a.gh.repoSlug = slug
-		a.gh.refilter(true)
-		a.gh.refilter(false)
+		a.gh.refilterAll()
 	}
 	return tea.Batch(a.ghFetch(&a.gh.prs, false), a.ghFetch(&a.gh.issues, false), a.ghEnsureDetail())
 }
 
-func (a *App) ghRefresh(force bool) tea.Cmd {
+func (a *App) ghRefresh() tea.Cmd {
 	if it := a.ghItem(); it != nil {
 		delete(a.gh.details, it.Key())
 	}
-	return tea.Batch(a.ghFetch(&a.gh.prs, force), a.ghFetch(&a.gh.issues, force), a.ghEnsureDetail())
+	return tea.Batch(a.ghFetch(&a.gh.prs, true), a.ghFetch(&a.gh.issues, true), a.ghEnsureDetail())
 }
 
 // previewPanel is the list whose selection the preview follows.
@@ -294,11 +307,7 @@ func (a *App) ghEnsureDetail() tea.Cmd {
 		cmds = append(cmds, tea.Tick(90*time.Millisecond, func(time.Time) tea.Msg { return ghDetailDebounceMsg{key} }))
 	}
 	if a.gh.showDiff && it.Kind == gh.PR && (d == nil || (d.diff == nil && !d.diffLoading && d.diffErr == nil)) {
-		if d == nil {
-			d = &detailData{}
-			a.gh.details[key] = d
-		}
-		d.diffLoading = true
+		a.gh.detail(key).diffLoading = true
 		item := *it
 		cmds = append(cmds, func() tea.Msg {
 			out, err := gh.Diff(item)
@@ -344,17 +353,12 @@ func (a *App) ghUpdate(msg tea.Msg) tea.Cmd {
 		g.user, g.userErr = msg.user, ""
 		return a.ghBranchPRs(a.selectedRepo())
 	case ghSectionMsg:
-		d := g.data[msg.key]
-		if d == nil {
-			d = &sectionData{}
-			g.data[msg.key] = d
-		}
+		d := g.section(msg.key)
 		d.loading, d.at, d.err = false, time.Now(), msg.err
 		if msg.err == nil {
 			d.items, d.total = msg.items, msg.total
 		}
-		g.refilter(true)
-		g.refilter(false)
+		g.refilterAll()
 		g.invalidatePreview()
 		if a.mode == modeGitHub {
 			return a.ghEnsureDetail()
@@ -364,29 +368,16 @@ func (a *App) ghUpdate(msg tea.Msg) tea.Cmd {
 		if it == nil || it.Key() != msg.key || msg.key != g.pendingDetail {
 			return nil
 		}
-		d := g.details[msg.key]
-		if d == nil {
-			d = &detailData{}
-			g.details[msg.key] = d
-		}
-		d.loading = true
+		g.detail(msg.key).loading = true
 		return fetchDetail(*it)
 	case ghDetailMsg:
-		d := g.details[msg.key]
-		if d == nil {
-			d = &detailData{}
-			g.details[msg.key] = d
-		}
+		d := g.detail(msg.key)
 		d.d, d.err, d.loading, d.at = msg.d, msg.err, false, time.Now()
-		g.version++
+		d.version++
 	case ghDiffMsg:
-		d := g.details[msg.key]
-		if d == nil {
-			d = &detailData{}
-			g.details[msg.key] = d
-		}
+		d := g.detail(msg.key)
 		d.diff, d.diffErr, d.diffLoading = msg.lines, msg.err, false
-		g.version++
+		d.version++
 	case branchPRsMsg:
 		g.branchPRs[msg.slug] = msg.m
 	case ghCheckoutMsg:
@@ -486,12 +477,15 @@ func (a *App) previewLines(width int) []string {
 		return a.ghEmptyPreview()
 	}
 	d := a.gh.details[it.Key()]
-	key := it.Key() + "|" + itoa(width) + "|" + itoa(a.gh.version)
+	key := it.Key() + "|" + itoa(width)
+	if d != nil {
+		key += "|" + itoa(d.version)
+		if d.loading {
+			key += "|loading"
+		}
+	}
 	if a.gh.showDiff {
 		key += "|diff"
-	}
-	if d != nil && d.loading {
-		key += "|loading"
 	}
 	if key == a.gh.previewFor {
 		return a.gh.preview.lines
@@ -527,6 +521,26 @@ func (a *App) ghEmptyPreview() []string {
 }
 
 func renderItem(it gh.Item, d *detailData, width int, spin string) []string {
+	out := itemHeader(it, d, width)
+	if d == nil || (d.loading && d.at.IsZero()) {
+		return append(out, "", spin+T.Dim.Render(" loading…"))
+	}
+	if d.err != nil {
+		return append(out, "", T.Red.Render(d.err.Error()))
+	}
+	dd := d.d
+	if it.Kind == gh.PR {
+		out = append(out, checksSection(dd.Checks, width)...)
+		out = append(out, reviewsSection(dd, width)...)
+	}
+	out = append(out, "", rule("Description", width), "")
+	out = append(out, markdown(dd.Body, width)...)
+	return append(out, commentsSection(dd.Comments, width)...)
+}
+
+// itemHeader is what the search result alone can show: title, state,
+// branches, stats, labels.
+func itemHeader(it gh.Item, d *detailData, width int) []string {
 	glyph, label, st := stateOf(it)
 	var out []string
 	out = append(out, T.Dim.Render(it.Repo+" #"+itoa(it.Number)))
@@ -561,85 +575,94 @@ func renderItem(it gh.Item, d *detailData, width int, spin string) []string {
 		}
 		out = append(out, wrap(strings.Join(chips, " "), width)...)
 	}
-	if d == nil || (d.loading && d.at.IsZero()) {
-		return append(out, "", spin+T.Dim.Render(" loading…"))
-	}
-	if d.err != nil {
-		return append(out, "", T.Red.Render(d.err.Error()))
-	}
-	dd := d.d
+	return out
+}
 
-	if it.Kind == gh.PR && len(dd.Checks) > 0 {
-		pass, fail, pend := 0, 0, 0
-		var failing, pending []gh.Check
-		for _, c := range dd.Checks {
-			switch c.Outcome() {
-			case "pass":
-				pass++
-			case "fail":
-				fail++
-				failing = append(failing, c)
-			case "pending":
-				pend++
-				pending = append(pending, c)
-			}
-		}
-		summary := T.Green.Render("✓ "+itoa(pass)) + "  " + T.Red.Render("✗ "+itoa(fail)) + "  " + T.Yellow.Render("● "+itoa(pend))
-		out = append(out, "", rule("Checks", width-lipgloss.Width(summary)-1)+" "+summary)
-		show := append(failing, pending...)
-		for i, c := range show {
-			if i == 8 {
-				out = append(out, T.Dim.Render("  … "+itoa(len(show)-8)+" more"))
-				break
-			}
-			g, s := "✗", T.Red
-			if c.Outcome() == "pending" {
-				g, s = "●", T.Yellow
-			}
-			line := "  " + s.Render(g) + " " + c.Name
-			if c.Workflow != "" {
-				line += T.Dim.Render("  " + c.Workflow)
-			}
-			out = append(out, line)
-		}
-		if len(show) == 0 {
-			out = append(out, T.Green.Render("  All checks passed"))
+// checksSection summarizes CI and lists what's failing or pending.
+func checksSection(checks []gh.Check, width int) []string {
+	if len(checks) == 0 {
+		return nil
+	}
+	pass := 0
+	var failing, pending []gh.Check
+	for _, c := range checks {
+		switch c.Outcome() {
+		case "pass":
+			pass++
+		case "fail":
+			failing = append(failing, c)
+		case "pending":
+			pending = append(pending, c)
 		}
 	}
-
-	if it.Kind == gh.PR && (len(dd.Reviews) > 0 || len(dd.ReviewRequests) > 0) {
-		out = append(out, "", rule("Reviews", width))
-		for _, r := range dd.Reviews {
-			g, s, word := "●", T.Dim, strings.ToLower(strings.ReplaceAll(r.State, "_", " "))
-			switch r.State {
-			case "APPROVED":
-				g, s, word = "✓", T.Green, "approved"
-			case "CHANGES_REQUESTED":
-				g, s, word = "✗", T.Red, "requested changes"
-			case "DISMISSED":
-				g, s, word = "○", T.Dim, "dismissed"
-			}
-			out = append(out, "  "+s.Render(g)+" "+T.Author(r.Author).Render(r.Author)+" "+s.Render(word)+T.Dim.Render(" "+agoLong(r.At)))
+	summary := T.Green.Render("✓ "+itoa(pass)) + "  " +
+		T.Red.Render("✗ "+itoa(len(failing))) + "  " +
+		T.Yellow.Render("● "+itoa(len(pending)))
+	out := []string{"", rule("Checks", width-lipgloss.Width(summary)-1) + " " + summary}
+	show := append(failing, pending...)
+	for i, c := range show {
+		if i == 8 {
+			out = append(out, T.Dim.Render("  … "+itoa(len(show)-8)+" more"))
+			break
 		}
-		for _, r := range dd.ReviewRequests {
-			out = append(out, "  "+T.Yellow.Render("○")+" "+T.Author(r).Render(r)+T.Dim.Render(" review requested"))
+		g, s := "✗", T.Red
+		if c.Outcome() == "pending" {
+			g, s = "●", T.Yellow
 		}
+		line := "  " + s.Render(g) + " " + c.Name
+		if c.Workflow != "" {
+			line += T.Dim.Render("  " + c.Workflow)
+		}
+		out = append(out, line)
 	}
+	if len(show) == 0 {
+		out = append(out, T.Green.Render("  All checks passed"))
+	}
+	return out
+}
 
-	out = append(out, "", rule("Description", width), "")
-	out = append(out, markdown(dd.Body, width)...)
-
-	if len(dd.Comments) > 0 {
-		out = append(out, "", rule("Comments "+T.Dim.Render(itoa(len(dd.Comments))), width))
-		start := max(0, len(dd.Comments)-10)
-		if start > 0 {
-			out = append(out, T.Dim.Render("  "+plural(start, "earlier comment")+" on GitHub"))
+// reviewsSection lists each reviewer's latest verdict and pending requests.
+func reviewsSection(dd gh.Detail, width int) []string {
+	if len(dd.Reviews) == 0 && len(dd.ReviewRequests) == 0 {
+		return nil
+	}
+	out := []string{"", rule("Reviews", width)}
+	for _, r := range dd.Reviews {
+		g, s, word := "●", T.Dim, strings.ToLower(strings.ReplaceAll(r.State, "_", " "))
+		switch r.State {
+		case "APPROVED":
+			g, s, word = "✓", T.Green, "approved"
+		case "CHANGES_REQUESTED":
+			g, s, word = "✗", T.Red, "requested changes"
+		case "DISMISSED":
+			g, s, word = "○", T.Dim, "dismissed"
 		}
-		for _, c := range dd.Comments[start:] {
-			out = append(out, "", T.Author(c.Author).Bold(true).Render(c.Author)+T.Dim.Render(" · "+agoLong(c.At)))
-			for _, l := range markdown(c.Body, width-2) {
-				out = append(out, T.Dim.Render("│ ")+l)
-			}
+		author := T.Author(r.Author).Render(r.Author)
+		when := T.Dim.Render(" " + agoLong(r.At))
+		out = append(out, "  "+s.Render(g)+" "+author+" "+s.Render(word)+when)
+	}
+	for _, r := range dd.ReviewRequests {
+		author := T.Author(r).Render(r)
+		out = append(out, "  "+T.Yellow.Render("○")+" "+author+T.Dim.Render(" review requested"))
+	}
+	return out
+}
+
+// commentsSection renders the last ten comments.
+func commentsSection(comments []gh.Comment, width int) []string {
+	if len(comments) == 0 {
+		return nil
+	}
+	out := []string{"", rule("Comments "+T.Dim.Render(itoa(len(comments))), width)}
+	start := max(0, len(comments)-10)
+	if start > 0 {
+		out = append(out, T.Dim.Render("  "+plural(start, "earlier comment")+" on GitHub"))
+	}
+	for _, c := range comments[start:] {
+		author := T.Author(c.Author).Bold(true).Render(c.Author)
+		out = append(out, "", author+T.Dim.Render(" · "+agoLong(c.At)))
+		for _, l := range markdown(c.Body, width-2) {
+			out = append(out, T.Dim.Render("│ ")+l)
 		}
 	}
 	return out
@@ -702,29 +725,23 @@ func (a *App) ghListPanel(p *ghPanel, pn pane, idx string, w, h int) string {
 	default:
 		panel.Body = renderList(&p.list, w-2, rows, focused, a.ghRow(p))
 	}
-	panel.Footer = p.list.footer()
+	a.listChrome(&panel, pn, &p.list)
 	if d != nil && d.total > len(d.items) {
 		panel.Footer += T.Dim.Render(" (" + itoa(d.total) + ")")
 	}
-	panel.Status = a.filterStatus(pn, &p.list)
 	if panel.Status == "" && d != nil && d.loading && !d.at.IsZero() {
 		panel.Status = a.spin.View()
 	}
-	panel.Total, panel.Offset = p.list.len(), p.list.offset
 	return panel.Render()
 }
 
 func (a *App) previewPanelView(w, h int) string {
 	inner, rows := w-2, h-2
 	a.previewLines(inner - 2)
-	// view returns a window onto the cached lines; indent a copy.
-	view := a.gh.preview.view(rows)
-	body := make([]string, len(view))
-	for i, l := range view {
-		body[i] = " " + l
-	}
+	// view returns a window onto the cached lines; indent copies them.
+	body := indent(a.gh.preview.view(rows))
 	p := Panel{W: w, H: h, Index: "0", Focused: a.focus == pPreview, Body: body,
-		Total: len(a.gh.preview.lines), Offset: a.gh.preview.offset}
+		Total: len(a.gh.preview.lines), Offset: a.gh.preview.offset, Footer: a.gh.preview.percent(rows)}
 	if it := a.ghItem(); it != nil && it.Kind == gh.PR {
 		p.Tabs = []string{"Overview", "Diff"}
 		if a.gh.showDiff {
@@ -732,9 +749,6 @@ func (a *App) previewPanelView(w, h int) string {
 		}
 	} else {
 		p.Title = "Preview"
-	}
-	if p.Total > rows && rows > 0 {
-		p.Footer = itoa(min(100, (a.gh.preview.offset+rows)*100/p.Total)) + "%"
 	}
 	return p.Render()
 }
@@ -759,9 +773,8 @@ func (a *App) ghKey(key string) (bool, tea.Cmd) {
 			a.focus = a.back
 			return true, nil
 		}
-		if l := a.listFor(a.focus); l != nil && l.filter != "" {
-			a.filterInput = ""
-			a.applyFilter()
+		if a.filterText() != "" {
+			a.setFilter("")
 		}
 		return true, a.ghEnsureDetail()
 	case "h", "left", "l", "right":
@@ -790,7 +803,7 @@ func (a *App) ghKey(key string) (bool, tea.Cmd) {
 		p.tab = (p.tab + d + n) % n
 		p.list.reset()
 		p.list.filter = ""
-		a.gh.refilter(p.kind == gh.PR)
+		a.gh.refilter(p)
 		return true, tea.Batch(a.ghFetch(p, false), a.ghEnsureDetail())
 	case "s":
 		a.openGHSearch()
@@ -807,9 +820,9 @@ func (a *App) ghKey(key string) (bool, tea.Cmd) {
 		}
 	}
 	if a.focus == pPreview {
-		return a.pagerKey(key, &a.gh.preview, a.panelRows(pPreview)), nil
+		return pagerKey(key, &a.gh.preview, a.panelRows(pPreview)), nil
 	}
-	if l := a.listFor(a.focus); l != nil && a.navKey(key, l, a.panelRows(a.focus)) {
+	if l := a.listFor(a.focus); l != nil && navKey(key, l, a.panelRows(a.focus)) {
 		return true, a.ghEnsureDetail()
 	}
 	return false, nil
@@ -824,11 +837,7 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 	}
 	ghRun := func(label, ok string, fn func() git.Result) tea.Cmd {
 		then := refresh()
-		return tea.Sequence(
-			func() tea.Msg { return busyMsg{1, label} },
-			func() tea.Msg { return resultMsg{res: fn(), ok: ok, then: then} },
-			func() tea.Msg { return busyMsg{-1, ""} },
-		)
+		return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, then: then} })
 	}
 	switch key {
 	case "o":
@@ -847,9 +856,8 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 		if it.State != "OPEN" {
 			return true, a.flash(num+" isn't open", true)
 		}
-		a.confirm("Close "+num+"?", []string{it.Title},
+		a.confirmDanger("Close "+num+"?", []string{it.Title},
 			ghRun("Closing", "Closed "+num, func() git.Result { return gh.Close(it) }))
-		a.modal.(*confirmModal).danger = true
 		return true, nil
 	case "X":
 		if it.State != "CLOSED" {
@@ -908,7 +916,7 @@ func (a *App) openGHSearch() {
 			p.tab = len(a.gh.sections(p.kind)) - 1
 		}
 		p.list.reset()
-		a.gh.refilter(p.kind == gh.PR)
+		a.gh.refilter(p)
 		return tea.Batch(a.ghFetch(p, true), a.ghEnsureDetail())
 	})
 }
@@ -937,19 +945,14 @@ func (a *App) ghCheckout(it gh.Item, lazy bool) tea.Cmd {
 }
 
 func (a *App) ghCheckoutCmd(it gh.Item, path string, clone, lazy bool) tea.Cmd {
-	label := "Checking out #" + itoa(it.Number)
-	return tea.Sequence(
-		func() tea.Msg { return busyMsg{1, label} },
-		func() tea.Msg {
-			if clone {
-				if r := git.CloneGH(it.Repo, path); r.Err != nil {
-					return ghCheckoutMsg{res: r, path: path, item: it}
-				}
+	return a.withBusy("Checking out #"+itoa(it.Number), func() tea.Msg {
+		if clone {
+			if r := git.CloneGH(it.Repo, path); r.Err != nil {
+				return ghCheckoutMsg{res: r, path: path, item: it}
 			}
-			return ghCheckoutMsg{res: gh.Checkout(path, it), path: path, cloned: clone, lazy: lazy, item: it}
-		},
-		func() tea.Msg { return busyMsg{-1, ""} },
-	)
+		}
+		return ghCheckoutMsg{res: gh.Checkout(path, it), path: path, cloned: clone, lazy: lazy, item: it}
+	})
 }
 
 func (a *App) onGHCheckout(msg ghCheckoutMsg) tea.Cmd {
@@ -965,7 +968,7 @@ func (a *App) onGHCheckout(msg ghCheckoutMsg) tea.Cmd {
 	a.focus, a.lfocus = pBranches, pBranches
 	a.branchTab = 0
 	if msg.cloned {
-		a.gh.selectAfterScan = msg.path
+		a.selectAfterScan = msg.path
 		cmds = append(cmds, a.scan())
 	} else {
 		cmds = append(cmds, a.selectRepoPath(msg.path))

@@ -18,7 +18,6 @@ type Seg struct {
 }
 
 func S(text string, st lipgloss.Style) Seg { return Seg{text, st} }
-func P(text string) Seg                    { return Seg{text, T.Fg} }
 
 // Row is a list line: Left is truncated to fit, Right stays flush right.
 type Row struct {
@@ -169,18 +168,19 @@ func (p Panel) Render() string {
 		maxOff := p.Total - rows
 		thumbStart = (rows - thumbLen) * min(p.Offset, maxOff) / max(1, maxOff)
 	}
+	left, right, thumb := border.Render(b.Left), border.Render(b.Right), border.Render("▐")
 	for i := 0; i < rows; i++ {
 		line := ""
 		if i < len(p.Body) {
 			line = p.Body[i]
 		}
-		right := b.Right
-		if thumbStart >= 0 && i >= thumbStart && i < thumbStart+thumbLen {
-			right = "▐"
-		}
-		out.WriteString(border.Render(b.Left))
+		out.WriteString(left)
 		out.WriteString(fit(line, inner))
-		out.WriteString(border.Render(right))
+		if thumbStart >= 0 && i >= thumbStart && i < thumbStart+thumbLen {
+			out.WriteString(thumb)
+		} else {
+			out.WriteString(right)
+		}
 		out.WriteByte('\n')
 	}
 
@@ -227,12 +227,7 @@ func (l *list) refilter(n int, text func(i int) string) {
 		}
 	}
 	if prev >= 0 {
-		for vi, i := range l.view {
-			if i == prev {
-				l.cursor = vi
-				break
-			}
-		}
+		l.selectIndex(prev)
 	}
 	l.clamp()
 }
@@ -315,6 +310,12 @@ func fuzzy(s, q string) bool {
 	return j == len(qi)
 }
 
+// listChrome fills a panel's counter, filter status and scrollbar from l.
+func (a *App) listChrome(pn *Panel, p pane, l *list) {
+	pn.Footer, pn.Status = l.footer(), a.filterStatus(p, l)
+	pn.Total, pn.Offset = l.len(), l.offset
+}
+
 // renderList draws the visible rows of l at width × h.
 func renderList(l *list, width, h int, focused bool, row func(i int) Row) []string {
 	from, to := l.window(h)
@@ -356,6 +357,23 @@ func (p *pager) scroll(d, h int) {
 	if p.offset < 0 {
 		p.offset = 0
 	}
+}
+
+// percent is the "42%" scroll position once the lines overflow h rows.
+func (p *pager) percent(h int) string {
+	if len(p.lines) <= h || h <= 0 {
+		return ""
+	}
+	return itoa(min(100, (p.offset+h)*100/len(p.lines))) + "%"
+}
+
+// indent prefixes a copy of lines with one space each.
+func indent(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = " " + l
+	}
+	return out
 }
 
 func (p *pager) view(h int) []string {

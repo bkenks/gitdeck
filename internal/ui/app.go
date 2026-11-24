@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bkenks/gitdeck/internal/config"
-	"github.com/bkenks/gitdeck/internal/gh"
 	"github.com/bkenks/gitdeck/internal/git"
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
@@ -73,18 +72,22 @@ type App struct {
 	back   pane // where esc returns to from the main panel
 
 	// Local
-	repos     []git.Repo
-	reposL    list
-	scanning  bool
-	scanErr   error
-	cur       *repoData
-	filesL    list
-	fileRows  []fileRow
-	collapsed map[string]bool
-	branchTab int
-	branchesL list
-	commitsL  list
-	stashL    list
+	repos    []git.Repo
+	reposL   list
+	scanning bool
+	scanErr  error
+	cur      *repoData
+	// repoPending is the repo a debounced detail load is waiting on, and
+	// selectAfterScan the repo to put the cursor on once a rescan lands.
+	repoPending     string
+	selectAfterScan string
+	filesL          list
+	fileRows        []fileRow
+	collapsed       map[string]bool
+	branchTab       int
+	branchesL       list
+	commitsL        list
+	stashL          list
 
 	main        pager
 	mainTitle   string
@@ -98,18 +101,18 @@ type App struct {
 	gh ghState
 
 	// Chrome
-	filtering   bool
-	filterInput string
-	modal       modal
-	toast       string
-	toastErr    bool
-	toastID     int
-	busy        int
-	busyLabel   string
-	spin        spinner.Model
-	rects       []rect
-	hasLazygit  bool
-	sortMode    string
+	filtering  bool
+	modal      modal
+	toast      string
+	toastErr   bool
+	toastID    int
+	busy       int
+	busyLabel  string
+	spin       spinner.Model
+	spinning   bool // a spinner tick is in flight
+	blurred    bool // the terminal reported losing focus
+	rects      []rect
+	hasLazygit bool
 }
 
 func New(cfg config.Config, opts Options) *App {
@@ -122,7 +125,6 @@ func New(cfg config.Config, opts Options) *App {
 		gfocus:    pPRs,
 		collapsed: map[string]bool{},
 		showLog:   true,
-		sortMode:  cfg.SortMode,
 		spin:      spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(T.Cyan)),
 	}
 	_, err := exec.LookPath(cfg.Lazygit.Command)
@@ -148,6 +150,7 @@ type (
 		lines      []string
 	}
 	mainDebounceMsg struct{ key string }
+	repoDebounceMsg struct{ path string }
 	resultMsg       struct {
 		res     git.Result
 		ok      string // toast on success
@@ -170,8 +173,8 @@ type (
 )
 
 func (a *App) Init() tea.Cmd {
-	cmds := []tea.Cmd{a.spin.Tick, tick(), a.scan()}
-	if a.mode == modeGitHub || gh.Available() {
+	cmds := []tea.Cmd{tick(), a.scan()}
+	if a.mode == modeGitHub || a.gh.available {
 		cmds = append(cmds, a.ghInit())
 	}
 	if a.cfg.RepoRoot() == "" {
@@ -186,121 +189,152 @@ func tick() tea.Cmd {
 
 // ─── Update ─────────────────────────────────────────────────────────────────
 
+// Update handles msg, then keeps the spinner ticking only while something
+// it stands for is in flight: an idle spinner would redraw the screen at
+// its frame rate for nothing.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
+	if spinTick, ok := msg.(spinner.TickMsg); ok {
+		if !a.loading() {
+			a.spinning = false
+			return a, nil
+		}
+		var c tea.Cmd
+		a.spin, c = a.spin.Update(spinTick)
+		return a, c
+	}
+	c := a.update(msg)
+	if !a.spinning && a.loading() {
+		a.spinning = true
+		c = tea.Batch(c, a.spin.Tick)
+	}
+	return a, c
+}
+
+// loading reports whether anything on screen is showing the spinner.
+func (a *App) loading() bool {
+	if a.scanning || a.busy > 0 {
+		return true
+	}
+	for _, d := range a.gh.data {
+		if d.loading {
+			return true
+		}
+	}
+	for _, d := range a.gh.details {
+		if d.loading || d.diffLoading {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.w, a.h = msg.Width, msg.Height
 		a.gh.invalidatePreview()
-		return a, a.syncMain()
-
-	case spinner.TickMsg:
-		var c tea.Cmd
-		a.spin, c = a.spin.Update(msg)
-		return a, c
-
+		return a.syncMain()
 	case tea.KeyPressMsg:
-		return a, a.handleKey(msg)
-
+		return a.handleKey(msg)
 	case tea.PasteMsg:
 		if a.modal != nil {
-			done, c := a.modal.update(msg, a)
-			if done {
-				a.modal = nil
-			}
-			return a, c
+			return a.updateModal(msg)
 		}
 		if a.filtering {
-			a.filterInput += msg.Content
-			a.applyFilter()
+			a.setFilter(a.filterText() + msg.Content)
 		}
-		return a, nil
-
+		return nil
 	case tea.MouseWheelMsg:
-		return a, a.handleWheel(msg)
-
+		return a.handleWheel(msg)
 	case tea.MouseClickMsg:
-		return a, a.handleClick(msg)
-
+		return a.handleClick(msg)
 	case tea.FocusMsg:
-		return a, a.refreshAll()
-
+		a.blurred = false
+		return a.refreshAll()
+	case tea.BlurMsg:
+		a.blurred = true
+		return nil
 	case tickMsg:
-		cmds = append(cmds, tick())
-		if a.modal == nil && a.mode == modeLocal && a.cur != nil {
-			cmds = append(cmds, a.loadRepo(a.cur.path), a.loadStats(a.cur.path))
+		// The status fields the repo list shows come back with the repo
+		// itself (see onRepo); the rest of Stats refreshes on focus.
+		if !a.blurred && a.modal == nil && a.mode == modeLocal && a.cur != nil {
+			return tea.Batch(tick(), a.loadRepo(a.cur.path))
 		}
-		return a, tea.Batch(cmds...)
-
+		return tick()
 	case toastMsg:
 		if msg.id == a.toastID {
 			a.toast = ""
 		}
-		return a, nil
-
+		return nil
 	case busyMsg:
 		a.busy += msg.delta
 		if msg.label != "" {
 			a.busyLabel = msg.label
 		}
-		return a, nil
-
+		return nil
 	case askReposDirMsg:
 		a.openReposDirPrompt()
-		return a, nil
-
+		return nil
 	case scannedMsg:
-		return a, a.onScanned(msg)
-
+		return a.onScanned(msg)
 	case statsMsg:
-		return a, a.onStats(msg)
-
+		return a.onStats(msg)
 	case clonedMsg:
-		return a, a.onCloned(msg)
-
+		return a.onCloned(msg)
+	case repoDebounceMsg:
+		return a.onRepoDebounce(msg.path)
 	case repoMsg:
-		return a, a.onRepo(msg.data)
+		return a.onRepo(msg.data)
+	case mainDebounceMsg, mainMsg:
+		return a.mainUpdate(msg)
+	case resultMsg:
+		return a.onResult(msg)
+	case pullAllMsg:
+		return a.onPullAll(msg)
+	case execDoneMsg:
+		return a.onExecDone(msg)
+	case ghUserMsg, ghSectionMsg, ghDetailMsg, ghDetailDebounceMsg, ghDiffMsg, branchPRsMsg, ghCheckoutMsg:
+		return a.ghUpdate(msg)
+	}
+	// Anything else (cursor blinks and the like) belongs to an open modal.
+	if a.modal != nil {
+		return a.updateModal(msg)
+	}
+	return nil
+}
 
+// updateModal passes msg to the open modal and closes it when it's done.
+func (a *App) updateModal(msg tea.Msg) tea.Cmd {
+	done, c := a.modal.update(msg, a)
+	if done {
+		a.modal = nil
+	}
+	return c
+}
+
+func (a *App) mainUpdate(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
 	case mainDebounceMsg:
 		if msg.key == a.mainPending {
-			return a, a.loadMain(msg.key)
+			return a.loadMain(msg.key)
 		}
-		return a, nil
-
 	case mainMsg:
 		if msg.key == a.mainPending || msg.key == a.mainKey {
 			keep := msg.key == a.mainKey
 			a.main.set(msg.lines, keep)
 			a.mainTitle, a.mainKey, a.mainPending = msg.title, msg.key, ""
 		}
-		return a, nil
-
-	case resultMsg:
-		return a, a.onResult(msg)
-
-	case pullAllMsg:
-		return a, a.onPullAll(msg)
-
-	case execDoneMsg:
-		if msg.err != nil {
-			cmds = append(cmds, a.flash(msg.what+": "+msg.err.Error(), true))
-		}
-		a.logCmd(msg.dir, msg.what, msg.err)
-		cmds = append(cmds, a.refreshAll())
-		return a, tea.Batch(cmds...)
-
-	case ghUserMsg, ghSectionMsg, ghDetailMsg, ghDetailDebounceMsg, ghDiffMsg, branchPRsMsg, ghCheckoutMsg:
-		return a, a.ghUpdate(msg)
 	}
-	// Anything else (cursor blinks and the like) belongs to an open modal.
-	if a.modal != nil {
-		done, c := a.modal.update(msg, a)
-		if done {
-			a.modal = nil
-		}
-		return a, c
+	return nil
+}
+
+func (a *App) onExecDone(msg execDoneMsg) tea.Cmd {
+	var flash tea.Cmd
+	if msg.err != nil {
+		flash = a.flash(msg.what+": "+msg.err.Error(), true)
 	}
-	return a, nil
+	a.logCmd(msg.dir, msg.what, msg.err)
+	return tea.Batch(flash, a.refreshAll())
 }
 
 func (a *App) flash(text string, isErr bool) tea.Cmd {
@@ -325,14 +359,18 @@ func (a *App) logCmd(dir, cmd string, err error) {
 	}
 }
 
-// run wraps a git action as a command: it shows the spinner while it runs
-// and reports back as a resultMsg.
-func (a *App) run(label string, refresh bool, ok string, fn func() git.Result) tea.Cmd {
+// withBusy runs work as a command with the footer spinner showing label.
+func (a *App) withBusy(label string, work func() tea.Msg) tea.Cmd {
 	return tea.Sequence(
 		func() tea.Msg { return busyMsg{1, label} },
-		func() tea.Msg { return resultMsg{res: fn(), ok: ok, refresh: refresh} },
+		work,
 		func() tea.Msg { return busyMsg{-1, ""} },
 	)
+}
+
+// run wraps a git action as a busy command that reports back as a resultMsg.
+func (a *App) run(label string, refresh bool, ok string, fn func() git.Result) tea.Cmd {
+	return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, refresh: refresh} })
 }
 
 func (a *App) onResult(msg resultMsg) tea.Cmd {
@@ -376,11 +414,7 @@ func (a *App) refreshAll() tea.Cmd {
 func (a *App) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	if a.modal != nil {
-		done, c := a.modal.update(msg, a)
-		if done {
-			a.modal = nil
-		}
-		return c
+		return a.updateModal(msg)
 	}
 	if a.filtering {
 		return a.handleFilterKey(msg)
@@ -392,18 +426,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "?":
 		a.openHelp()
 		return nil
-	case "tab":
-		return a.switchMode()
-	case "shift+tab":
+	case "tab", "shift+tab":
 		return a.switchMode()
 	case "@":
 		a.showLog = !a.showLog
 		return nil
 	case "R":
 		if a.mode == modeGitHub {
-			return a.ghRefresh(true)
+			return a.ghRefresh()
 		}
-		return tea.Batch(a.scan(), a.refreshAll())
+		return tea.Batch(a.scan(), a.loadAllStats(a.repoPaths()), a.refreshAll())
 	}
 	var c tea.Cmd
 	var handled bool
@@ -454,7 +486,7 @@ func (a *App) listFor(p pane) *list {
 }
 
 // navKey handles movement shared by every list panel.
-func (a *App) navKey(key string, l *list, h int) bool {
+func navKey(key string, l *list, h int) bool {
 	page := max(1, h-2)
 	switch key {
 	case "j", "down":
@@ -476,8 +508,8 @@ func (a *App) navKey(key string, l *list, h int) bool {
 	return true
 }
 
-// pagerKey scrolls the main/preview panel.
-func (a *App) pagerKey(key string, p *pager, h int) bool {
+// pagerKey scrolls a pager h rows tall.
+func pagerKey(key string, p *pager, h int) bool {
 	switch key {
 	case "j", "down":
 		p.scroll(1, h)
@@ -500,30 +532,32 @@ func (a *App) pagerKey(key string, p *pager, h int) bool {
 // ─── Filter ─────────────────────────────────────────────────────────────────
 
 func (a *App) startFilter() {
-	l := a.listFor(a.focus)
-	if l == nil {
-		return
+	a.filtering = a.listFor(a.focus) != nil
+}
+
+// filterText is the focused list's filter.
+func (a *App) filterText() string {
+	if l := a.listFor(a.focus); l != nil {
+		return l.filter
 	}
-	a.filtering = true
-	a.filterInput = l.filter
+	return ""
 }
 
 func (a *App) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		a.filtering = false
-		a.filterInput = ""
-		a.applyFilter()
+		a.setFilter("")
 	case "enter":
 		a.filtering = false
 	case "backspace":
-		if r := []rune(a.filterInput); len(r) > 0 {
-			a.filterInput = string(r[:len(r)-1])
+		r := []rune(a.filterText())
+		if len(r) > 0 {
+			r = r[:len(r)-1]
 		}
-		a.applyFilter()
+		a.setFilter(string(r))
 	case "ctrl+u":
-		a.filterInput = ""
-		a.applyFilter()
+		a.setFilter("")
 	case "up", "ctrl+p":
 		if l := a.listFor(a.focus); l != nil {
 			l.move(-1)
@@ -534,22 +568,21 @@ func (a *App) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	default:
 		if t := msg.Key().Text; t != "" {
-			a.filterInput += t
-			a.applyFilter()
+			a.setFilter(a.filterText() + t)
 		} else if msg.String() == "space" {
-			a.filterInput += " "
-			a.applyFilter()
+			a.setFilter(a.filterText() + " ")
 		}
 	}
 	return a.afterMove(a.focus)
 }
 
-func (a *App) applyFilter() {
+// setFilter replaces the focused list's filter and refilters it.
+func (a *App) setFilter(q string) {
 	l := a.listFor(a.focus)
 	if l == nil {
 		return
 	}
-	l.filter = a.filterInput
+	l.filter = q
 	l.cursor = 0
 	switch a.focus {
 	case pRepos:
@@ -562,15 +595,17 @@ func (a *App) applyFilter() {
 		a.refilterCommits()
 	case pStash:
 		a.refilterStash()
-	case pPRs, pIssues:
-		a.gh.refilter(a.focus == pPRs)
+	case pPRs:
+		a.gh.refilter(&a.gh.prs)
+	case pIssues:
+		a.gh.refilter(&a.gh.issues)
 	}
 }
 
 // filterStatus is the bottom-left of a panel: the live filter, if any.
 func (a *App) filterStatus(p pane, l *list) string {
 	if a.filtering && a.focus == p {
-		return T.SearchingBorder.Render("/"+a.filterInput) + T.SearchingBorder.Render("▏")
+		return T.SearchingBorder.Render("/" + l.filter + "▏")
 	}
 	if l.filter != "" {
 		return T.Dim.Render("filter: ") + T.Cyan.Render(l.filter)

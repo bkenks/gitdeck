@@ -184,9 +184,6 @@ func adoptGitkeeper(cfg *Config) {
 	var gk struct {
 		ReposDir string    `json:"reposDir"`
 		Keybinds []Keybind `json:"keybinds"`
-		UI       struct {
-			SortMode string `json:"sortMode"`
-		} `json:"ui"`
 	}
 	if json.Unmarshal(data, &gk) != nil {
 		return
