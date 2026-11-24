@@ -11,7 +11,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bkenks/gitdeck/internal/config"
+	"github.com/bkenks/gitdeck/internal/gh"
 	"github.com/bkenks/gitdeck/internal/git"
+	"github.com/bkenks/gitdeck/internal/proc"
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
 
@@ -72,11 +74,11 @@ func (a *App) localKey(key string) (bool, tea.Cmd) {
 		case "L", "ctrl+g":
 			return true, a.openLazygit(repo.Path, a.lazygitArgs()...)
 		case "p":
-			return true, a.run("Pulling "+repo.Name, true, "Pulled "+repo.Name, func() git.Result { return git.Pull(repo.Path) })
+			return true, a.run("Pulling "+repo.Name, true, "Pulled "+repo.Name, func() proc.Result { return git.Pull(repo.Path) })
 		case "P":
-			return true, a.run("Pushing "+repo.Name, true, "Pushed "+repo.Name, func() git.Result { return git.Push(repo.Path) })
+			return true, a.run("Pushing "+repo.Name, true, "Pushed "+repo.Name, func() proc.Result { return git.Push(repo.Path) })
 		case "f":
-			return true, a.run("Fetching "+repo.Name, true, "Fetched "+repo.Name, func() git.Result { return git.Fetch(repo.Path) })
+			return true, a.run("Fetching "+repo.Name, true, "Fetched "+repo.Name, func() proc.Result { return git.Fetch(repo.Path) })
 		}
 	}
 	switch key {
@@ -192,14 +194,14 @@ func (a *App) filesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		}
 		path := row.path
 		if allStaged(row.files) {
-			return true, a.run("Unstaging", true, "", func() git.Result { return git.Unstage(dir, path) })
+			return true, a.run("Unstaging", true, "", func() proc.Result { return git.Unstage(dir, path) })
 		}
-		return true, a.run("Staging", true, "", func() git.Result { return git.Stage(dir, path) })
+		return true, a.run("Staging", true, "", func() proc.Result { return git.Stage(dir, path) })
 	case "a":
 		if a.cur != nil && allStaged(a.cur.status.Files) {
-			return true, a.run("Unstaging all", true, "", func() git.Result { return git.UnstageAll(dir) })
+			return true, a.run("Unstaging all", true, "", func() proc.Result { return git.UnstageAll(dir) })
 		}
-		return true, a.run("Staging all", true, "", func() git.Result { return git.StageAll(dir) })
+		return true, a.run("Staging all", true, "", func() proc.Result { return git.StageAll(dir) })
 	case "c":
 		return true, a.openCommit(repo)
 	case "d":
@@ -265,9 +267,9 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		ok := "Checked out " + name
 		switch a.branchTab {
 		case 1:
-			return true, a.run("Checking out", true, ok, func() git.Result { return git.CheckoutRemote(dir, name) })
+			return true, a.run("Checking out", true, ok, func() proc.Result { return git.CheckoutRemote(dir, name) })
 		default:
-			return true, a.run("Checking out", true, ok, func() git.Result { return git.Checkout(dir, name) })
+			return true, a.run("Checking out", true, ok, func() proc.Result { return git.Checkout(dir, name) })
 		}
 	case "d":
 		if a.branchTab == 0 {
@@ -324,12 +326,12 @@ func (a *App) stashKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 	dir, ref := repo.Path, a.cur.stashes[i].Ref
 	switch key {
 	case "space":
-		return true, a.run("Applying stash", true, "Applied "+ref, func() git.Result { return git.StashApply(dir, ref) })
+		return true, a.run("Applying stash", true, "Applied "+ref, func() proc.Result { return git.StashApply(dir, ref) })
 	case "g":
-		return true, a.run("Popping stash", true, "Popped "+ref, func() git.Result { return git.StashPop(dir, ref) })
+		return true, a.run("Popping stash", true, "Popped "+ref, func() proc.Result { return git.StashPop(dir, ref) })
 	case "d":
 		a.confirm("Drop stash?", []string{a.cur.stashes[i].Message, "", T.Dim.Render("This can't be undone.")},
-			a.run("Dropping stash", true, "Dropped "+ref, func() git.Result { return git.StashDrop(dir, ref) }))
+			a.run("Dropping stash", true, "Dropped "+ref, func() proc.Result { return git.StashDrop(dir, ref) }))
 		return true, nil
 	case "enter":
 		a.setFocus(pMain)
@@ -351,7 +353,7 @@ func (a *App) pullAll() tea.Cmd {
 		return a.flash("Nothing to pull: no repo has an upstream", true)
 	}
 	return a.withBusy(fmt.Sprintf("Pulling %d repos", len(repos)), func() tea.Msg {
-		results := make([]git.Result, len(repos))
+		results := make([]proc.Result, len(repos))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 6)
 		for i, r := range repos {
@@ -412,9 +414,7 @@ func (a *App) confirmDelete(r git.Repo) {
 	root := a.cfg.RepoRoot()
 	path := r.Path
 	a.confirmDanger("Delete "+r.Name+"?", body, func() tea.Msg {
-		err := git.Remove(root, path)
-		return resultMsg{res: git.Result{Dir: filepath.Dir(path), Cmd: "rm -rf " + config.TildePath(path), Err: err},
-			ok: "Deleted " + filepath.Base(path), rescan: true}
+		return resultMsg{res: git.Remove(root, path), ok: "Deleted " + filepath.Base(path), rescan: true}
 	})
 }
 
@@ -427,7 +427,7 @@ func (a *App) confirmDiscard(dir string, row fileRow) {
 	body := []string{"Throw away all changes to", T.Bold.Render(what), "",
 		T.Dim.Render("Staged and unstaged. This can't be undone.")}
 	a.confirmDanger("Discard changes?", body,
-		a.run("Discarding", true, "Discarded "+row.path, func() git.Result { return git.Discard(dir, files) }))
+		a.run("Discarding", true, "Discarded "+row.path, func() proc.Result { return git.Discard(dir, files) }))
 }
 
 func (a *App) confirmDeleteBranch(dir string, b git.Branch) tea.Cmd {
@@ -436,7 +436,7 @@ func (a *App) confirmDeleteBranch(dir string, b git.Branch) tea.Cmd {
 	}
 	body := []string{T.Bold.Render(b.Name), "",
 		T.Dim.Render("Uses git branch -d, so unmerged work is safe.")}
-	del := func() git.Result { return git.DeleteBranch(dir, b.Name) }
+	del := func() proc.Result { return git.DeleteBranch(dir, b.Name) }
 	a.confirm("Delete branch?", body, a.run("Deleting branch", true, "Deleted "+b.Name, del))
 	return nil
 }
@@ -454,14 +454,14 @@ func (a *App) openCommit(repo *git.Repo) tea.Cmd {
 		if strings.TrimSpace(msg) == "" {
 			return a.flash("Empty commit message", true)
 		}
-		return a.run("Committing", true, "Committed", func() git.Result { return git.CommitMsg(dir, msg) })
+		return a.run("Committing", true, "Committed", func() proc.Result { return git.CommitMsg(dir, msg) })
 	})
 	return nil
 }
 
 func (a *App) openStash(dir string) {
 	a.modal = newInput("Stash changes", "Message (optional)", "", func(msg string) tea.Cmd {
-		return a.run("Stashing", true, "Stashed", func() git.Result { return git.StashPush(dir, msg) })
+		return a.run("Stashing", true, "Stashed", func() proc.Result { return git.StashPush(dir, msg) })
 	})
 }
 
@@ -471,7 +471,7 @@ func (a *App) openNewBranch(dir string) {
 		if name == "" {
 			return nil
 		}
-		return a.run("Creating branch", true, "On new branch "+name, func() git.Result { return git.NewBranch(dir, name) })
+		return a.run("Creating branch", true, "On new branch "+name, func() proc.Result { return git.NewBranch(dir, name) })
 	})
 }
 
@@ -499,7 +499,7 @@ func (a *App) cloneAll(urls []string, root string) tea.Cmd {
 	return a.withBusy("Cloning "+plural(len(urls), "repo"), func() tea.Msg {
 		var first string
 		var failed []string
-		var last git.Result
+		var last proc.Result
 		for _, u := range urls {
 			dest, slug, err := git.CloneDest(root, u)
 			if err != nil {
@@ -515,7 +515,7 @@ func (a *App) cloneAll(urls []string, root string) tea.Cmd {
 			}
 			_ = os.MkdirAll(filepath.Dir(dest), 0o755)
 			if slug != "" {
-				last = git.CloneGH(slug, dest)
+				last = gh.Clone(slug, dest)
 			} else {
 				last = git.Clone(u, dest)
 			}
@@ -535,7 +535,7 @@ type clonedMsg struct {
 	first  string
 	failed []string
 	n      int
-	last   git.Result
+	last   proc.Result
 }
 
 type askReposDirMsg struct{}

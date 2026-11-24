@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/bkenks/gitdeck/internal/config"
 )
 
 func TestParseBranchLine(t *testing.T) {
@@ -34,18 +36,22 @@ func TestParseBranchLine(t *testing.T) {
 func TestRemoveRefusesOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
-	if err := Remove(root, outside); err == nil {
+	if r := Remove(root, outside); r.Err == nil {
 		t.Fatal("Remove deleted a path outside the root")
 	}
-	if err := Remove(root, root); err == nil {
+	if r := Remove(root, root); r.Err == nil {
 		t.Fatal("Remove deleted the root itself")
 	}
 	repo := filepath.Join(root, "owner", "repo")
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(root, repo); err != nil {
-		t.Fatal(err)
+	r := Remove(root, repo)
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if r.Dir != filepath.Join(root, "owner") || r.Cmd != "rm -rf "+config.TildePath(repo) {
+		t.Errorf("result: %+v", r)
 	}
 	if _, err := os.Stat(filepath.Join(root, "owner")); !os.IsNotExist(err) {
 		t.Error("empty namespace dir was left behind")
@@ -150,5 +156,32 @@ func TestStatusAndActions(t *testing.T) {
 	}
 	if r := StashPop(dir, ss[0].Ref); r.Err != nil {
 		t.Fatal(r.Err)
+	}
+}
+
+// TestReadAndRunErrors pins the messages the footer shows when git fails:
+// reads report stderr's first line, actions git's own diagnosis.
+func TestReadAndRunErrors(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	if r := Run(dir, "init", "-q", "-b", "main"); r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if _, err := Read(dir, "rev-parse", "--verify", "--quiet", "nope"); err == nil ||
+		err.Error() != "exit status 1" {
+		t.Errorf("read with empty stderr: %v", err)
+	}
+	if _, err := Read(dir, "rev-parse", "--verify", "nope"); err == nil ||
+		err.Error() != "fatal: Needed a single revision" {
+		t.Errorf("read with stderr: %v", err)
+	}
+	r := Run(dir, "checkout", "nope")
+	if r.Err == nil || r.Err.Error() != "error: pathspec 'nope' did not match any file(s) known to git" {
+		t.Errorf("run error: %v", r.Err)
+	}
+	if r.Cmd != "git checkout nope" || r.Dir != dir {
+		t.Errorf("run result: %+v", r)
 	}
 }

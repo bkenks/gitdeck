@@ -10,6 +10,7 @@ import (
 	"github.com/bkenks/gitdeck/internal/config"
 	"github.com/bkenks/gitdeck/internal/gh"
 	"github.com/bkenks/gitdeck/internal/git"
+	"github.com/bkenks/gitdeck/internal/proc"
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
 
@@ -86,7 +87,7 @@ type (
 		m    map[string]gh.BranchPR
 	}
 	ghCheckoutMsg struct {
-		res    git.Result
+		res    proc.Result
 		path   string
 		cloned bool
 		lazy   bool
@@ -834,7 +835,7 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 		s, _ := a.gh.current(p)
 		return tea.Batch(fetchDetail(it), fetchSection(p.kind, s.query, a.gh.cfg.Limit))
 	}
-	ghRun := func(label, ok string, fn func() git.Result) tea.Cmd {
+	ghRun := func(label, ok string, fn func() proc.Result) tea.Cmd {
 		then := refresh()
 		return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, then: then} })
 	}
@@ -848,7 +849,7 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 			if strings.TrimSpace(body) == "" {
 				return nil
 			}
-			return ghRun("Commenting", "Commented on "+num, func() git.Result { return gh.CommentOn(it, body) })
+			return ghRun("Commenting", "Commented on "+num, func() proc.Result { return gh.CommentOn(it, body) })
 		})
 		return true, nil
 	case "x":
@@ -856,13 +857,13 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 			return true, a.flash(num+" isn't open", true)
 		}
 		a.confirmDanger("Close "+num+"?", []string{it.Title},
-			ghRun("Closing", "Closed "+num, func() git.Result { return gh.Close(it) }))
+			ghRun("Closing", "Closed "+num, func() proc.Result { return gh.Close(it) }))
 		return true, nil
 	case "X":
 		if it.State != "CLOSED" {
 			return true, a.flash(num+" isn't closed", true)
 		}
-		return true, ghRun("Reopening", "Reopened "+num, func() git.Result { return gh.Reopen(it) })
+		return true, ghRun("Reopening", "Reopened "+num, func() proc.Result { return gh.Reopen(it) })
 	}
 	if it.Kind != gh.PR {
 		return false, nil
@@ -874,20 +875,20 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 		return true, a.ghCheckout(it, true)
 	case "a":
 		a.confirm("Approve "+num+"?", []string{it.Title, T.Dim.Render(it.Repo)},
-			ghRun("Approving", "Approved "+num, func() git.Result { return gh.Approve(it) }))
+			ghRun("Approving", "Approved "+num, func() proc.Result { return gh.Approve(it) }))
 		return true, nil
 	case "r":
 		if !it.Draft {
 			return true, a.flash(num+" isn't a draft", true)
 		}
-		return true, ghRun("Marking ready", num+" is ready for review", func() git.Result { return gh.MarkReady(it) })
+		return true, ghRun("Marking ready", num+" is ready for review", func() proc.Result { return gh.MarkReady(it) })
 	case "m":
 		if it.State != "OPEN" {
 			return true, a.flash(num+" isn't open", true)
 		}
 		merge := func(method string) func() tea.Cmd {
 			return func() tea.Cmd {
-				return ghRun("Merging", "Merged "+num, func() git.Result { return gh.Merge(it, method) })
+				return ghRun("Merging", "Merged "+num, func() proc.Result { return gh.Merge(it, method) })
 			}
 		}
 		a.modal = &menuModal{title: "Merge " + num, items: []menuItem{
@@ -949,7 +950,7 @@ func (a *App) ghCheckout(it gh.Item, lazy bool) tea.Cmd {
 func (a *App) ghCheckoutCmd(it gh.Item, path string, clone, lazy bool) tea.Cmd {
 	return a.withBusy("Checking out #"+itoa(it.Number), func() tea.Msg {
 		if clone {
-			if r := git.CloneGH(it.Repo, path); r.Err != nil {
+			if r := gh.Clone(it.Repo, path); r.Err != nil {
 				return ghCheckoutMsg{res: r, path: path, item: it}
 			}
 		}

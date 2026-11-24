@@ -3,105 +3,37 @@
 package git
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bkenks/gitdeck/internal/config"
+	"github.com/bkenks/gitdeck/internal/proc"
 )
 
-// Read runs a read-only git command. Optional locks are off so a refresh
-// never fights with another git process over the index.
-func Read(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
-	Detach(cmd)
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	err := cmd.Run()
-	if err != nil {
-		if msg := strings.TrimSpace(errb.String()); msg != "" {
-			err = errors.New(firstLine(msg))
-		}
-	}
-	return out.String(), err
-}
+// readEnv turns optional locks off so a refresh never fights with another
+// git process over the index, and pins the locale so output parses the same
+// everywhere.
+var readEnv = []string{"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 
-// Result is the outcome of a command that changes something. The UI logs
-// Cmd in its command log.
-type Result struct {
-	Dir    string
-	Cmd    string
-	Output string
-	Err    error
+// runEnv keeps actions from prompting. GH_PROMPT_DISABLED covers gh when it
+// is git's credential helper.
+var runEnv = []string{"GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1"}
+
+// Read runs a read-only git command and returns its stdout.
+func Read(dir string, args ...string) (string, error) {
+	return proc.Read(dir, readEnv, "git", args...)
 }
 
 // Run runs a git command that changes state.
-func Run(dir string, args ...string) Result {
-	return RunCmd(dir, "git", args...)
-}
-
-// RunCmd runs any command in dir, detached from the terminal.
-func RunCmd(dir, name string, args ...string) Result {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
-	Detach(cmd)
-	out, err := cmd.CombinedOutput()
-	r := Result{Dir: dir, Cmd: Display(name, args...), Output: strings.TrimSpace(string(out))}
-	if err != nil {
-		msg := lastMeaningfulLine(r.Output)
-		if msg == "" {
-			msg = err.Error()
-		}
-		r.Err = errors.New(msg)
-	}
-	return r
-}
-
-// Display renders a command line for the command log.
-func Display(name string, args ...string) string {
-	parts := []string{name}
-	for _, a := range args {
-		if a == "" || strings.ContainsAny(a, " \t\"'") {
-			a = strconv.Quote(a)
-		}
-		parts = append(parts, a)
-	}
-	return strings.Join(parts, " ")
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
-
-func lastMeaningfulLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	// git's own diagnosis beats a wrapper's "exit status 128".
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if strings.HasPrefix(l, "fatal: ") || strings.HasPrefix(l, "error: ") {
-			return l
-		}
-	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		l := strings.TrimSpace(lines[i])
-		if l == "" || strings.HasPrefix(l, "hint:") {
-			continue
-		}
-		return l
-	}
-	return ""
+func Run(dir string, args ...string) proc.Result {
+	return proc.Run(dir, runEnv, "git", args...)
 }
 
 // ─── Repos ──────────────────────────────────────────────────────────────────
@@ -249,7 +181,7 @@ func RemoteURL(dir string) string {
 	if err != nil {
 		return ""
 	}
-	if name := firstLine(strings.TrimSpace(out)); name != "" {
+	if name, _, _ := strings.Cut(strings.TrimSpace(out), "\n"); name != "" {
 		if u, err := Read(dir, "remote", "get-url", name); err == nil {
 			return strings.TrimSpace(u)
 		}
@@ -577,25 +509,22 @@ func Graph(dir, ref string, n int) (string, error) {
 
 // ─── Actions ────────────────────────────────────────────────────────────────
 
-func Stage(dir, path string) Result     { return Run(dir, "add", "-A", "--", path) }
-func StageAll(dir string) Result        { return Run(dir, "add", "-A") }
-func UnstageAll(dir string) Result      { return Run(dir, "reset", "-q") }
-func CommitMsg(dir, msg string) Result  { return Run(dir, "commit", "-m", msg) }
-func Checkout(dir, ref string) Result   { return Run(dir, "checkout", ref) }
-func NewBranch(dir, n string) Result    { return Run(dir, "checkout", "-b", n) }
-func DeleteBranch(dir, n string) Result { return Run(dir, "branch", "-d", n) }
-func Fetch(dir string) Result           { return Run(dir, "fetch", "--all", "--prune") }
-func Pull(dir string) Result            { return Run(dir, "pull") }
-func PullFFOnly(dir string) Result      { return Run(dir, "pull", "--ff-only") }
-func StashApply(dir, ref string) Result { return Run(dir, "stash", "apply", ref) }
-func StashPop(dir, ref string) Result   { return Run(dir, "stash", "pop", ref) }
-func StashDrop(dir, ref string) Result  { return Run(dir, "stash", "drop", ref) }
-func Clone(url, dest string) Result     { return RunCmd(filepath.Dir(dest), "git", "clone", url, dest) }
-func CloneGH(slug, dest string) Result {
-	return RunCmd(filepath.Dir(dest), "gh", "repo", "clone", slug, dest)
-}
+func Stage(dir, path string) proc.Result     { return Run(dir, "add", "-A", "--", path) }
+func StageAll(dir string) proc.Result        { return Run(dir, "add", "-A") }
+func UnstageAll(dir string) proc.Result      { return Run(dir, "reset", "-q") }
+func CommitMsg(dir, msg string) proc.Result  { return Run(dir, "commit", "-m", msg) }
+func Checkout(dir, ref string) proc.Result   { return Run(dir, "checkout", ref) }
+func NewBranch(dir, n string) proc.Result    { return Run(dir, "checkout", "-b", n) }
+func DeleteBranch(dir, n string) proc.Result { return Run(dir, "branch", "-d", n) }
+func Fetch(dir string) proc.Result           { return Run(dir, "fetch", "--all", "--prune") }
+func Pull(dir string) proc.Result            { return Run(dir, "pull") }
+func PullFFOnly(dir string) proc.Result      { return Run(dir, "pull", "--ff-only") }
+func StashApply(dir, ref string) proc.Result { return Run(dir, "stash", "apply", ref) }
+func StashPop(dir, ref string) proc.Result   { return Run(dir, "stash", "pop", ref) }
+func StashDrop(dir, ref string) proc.Result  { return Run(dir, "stash", "drop", ref) }
+func Clone(url, dest string) proc.Result     { return Run(filepath.Dir(dest), "clone", url, dest) }
 
-func StashPush(dir, msg string) Result {
+func StashPush(dir, msg string) proc.Result {
 	args := []string{"stash", "push", "--include-untracked"}
 	if msg != "" {
 		args = append(args, "-m", msg)
@@ -605,7 +534,7 @@ func StashPush(dir, msg string) Result {
 
 // Unstage removes a path from the index. On an unborn branch there's no HEAD
 // to reset to, so it falls back to rm --cached.
-func Unstage(dir, path string) Result {
+func Unstage(dir, path string) proc.Result {
 	r := Run(dir, "reset", "-q", "--", path)
 	if r.Err != nil {
 		return Run(dir, "rm", "--cached", "-r", "-q", "--", path)
@@ -614,7 +543,7 @@ func Unstage(dir, path string) Result {
 }
 
 // CheckoutRemote checks out a remote branch as a local tracking branch.
-func CheckoutRemote(dir, remoteRef string) Result {
+func CheckoutRemote(dir, remoteRef string) proc.Result {
 	local := remoteRef
 	if i := strings.Index(remoteRef, "/"); i >= 0 {
 		local = remoteRef[i+1:]
@@ -632,7 +561,7 @@ func BranchExists(dir, name string) bool {
 }
 
 // Push pushes, setting an upstream on origin the first time.
-func Push(dir string) Result {
+func Push(dir string) proc.Result {
 	if _, err := Read(dir, "rev-parse", "--abbrev-ref", "@{u}"); err != nil {
 		return Run(dir, "push", "-u", "origin", "HEAD")
 	}
@@ -640,8 +569,8 @@ func Push(dir string) Result {
 }
 
 // Discard throws away all changes to files, staged and not.
-func Discard(dir string, files []File) Result {
-	var last Result
+func Discard(dir string, files []File) proc.Result {
+	var last proc.Result
 	for _, f := range files {
 		switch {
 		case f.Untracked():
@@ -670,7 +599,15 @@ func Discard(dir string, files []File) Result {
 
 // Remove deletes a repo and prunes now-empty namespace dirs up to root.
 // It refuses anything not strictly inside root.
-func Remove(root, path string) error {
+func Remove(root, path string) proc.Result {
+	return proc.Result{
+		Dir: filepath.Dir(path),
+		Cmd: "rm -rf " + config.TildePath(path),
+		Err: removeTree(root, path),
+	}
+}
+
+func removeTree(root, path string) error {
 	if !inside(root, path) {
 		return fmt.Errorf("refusing to delete %s: not inside %s", path, root)
 	}

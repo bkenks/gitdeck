@@ -15,6 +15,7 @@ import (
 
 	"github.com/bkenks/gitdeck/internal/config"
 	"github.com/bkenks/gitdeck/internal/git"
+	"github.com/bkenks/gitdeck/internal/proc"
 	. "github.com/bkenks/gitdeck/internal/theme"
 )
 
@@ -152,7 +153,7 @@ type (
 	mainDebounceMsg struct{ key string }
 	repoDebounceMsg struct{ path string }
 	resultMsg       struct {
-		res     git.Result
+		res     proc.Result
 		ok      string // toast on success
 		refresh bool   // reload the repo afterwards
 		rescan  bool   // rescan the repos dir afterwards
@@ -165,7 +166,7 @@ type (
 		dir  string
 		what string
 	}
-	pullAllMsg struct{ results []git.Result }
+	pullAllMsg struct{ results []proc.Result }
 	busyMsg    struct {
 		delta int
 		label string
@@ -369,7 +370,7 @@ func (a *App) withBusy(label string, work func() tea.Msg) tea.Cmd {
 }
 
 // run wraps a git action as a busy command that reports back as a resultMsg.
-func (a *App) run(label string, refresh bool, ok string, fn func() git.Result) tea.Cmd {
+func (a *App) run(label string, refresh bool, ok string, fn func() proc.Result) tea.Cmd {
 	return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, refresh: refresh} })
 }
 

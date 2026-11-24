@@ -3,17 +3,16 @@
 package gh
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bkenks/gitdeck/internal/git"
+	"github.com/bkenks/gitdeck/internal/proc"
 )
 
 type Kind int
@@ -65,26 +64,27 @@ func Available() bool {
 	return err == nil
 }
 
-func run(args ...string) ([]byte, error) {
-	cmd := exec.Command("gh", args...)
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "NO_COLOR=1", "GH_NO_UPDATE_NOTIFIER=1")
-	git.Detach(cmd)
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(errb.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		msg, _, _ = strings.Cut(msg, "\n")
-		return nil, errors.New(msg)
+// env keeps gh from prompting and its output plain. GIT_TERMINAL_PROMPT
+// covers the git that gh runs for clone and checkout.
+var env = []string{
+	"GH_PROMPT_DISABLED=1", "NO_COLOR=1", "GH_NO_UPDATE_NOTIFIER=1", "GIT_TERMINAL_PROMPT=0",
+}
+
+func read(args ...string) ([]byte, error) {
+	out, err := proc.Read("", env, "gh", args...)
+	if err != nil {
+		return nil, err
 	}
-	return out.Bytes(), nil
+	return []byte(out), nil
+}
+
+func run(dir string, args ...string) proc.Result {
+	return proc.Run(dir, env, "gh", args...)
 }
 
 // User is the login gh is authenticated as.
 func User() (string, error) {
-	out, err := run("api", "user", "--jq", ".login")
+	out, err := read("api", "user", "--jq", ".login")
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -165,7 +165,7 @@ func Search(kind Kind, filters string, limit int) ([]Item, int, error) {
 	if !strings.Contains(q, "sort:") {
 		q += " sort:updated-desc"
 	}
-	out, err := run("api", "graphql", "-f", "query="+searchQuery, "-f", "q="+q, "-F", "n="+strconv.Itoa(limit))
+	out, err := read("api", "graphql", "-f", "query="+searchQuery, "-f", "q="+q, "-F", "n="+strconv.Itoa(limit))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -286,7 +286,7 @@ func comments(raw []rawComment) []Comment {
 func GetDetail(it Item) (Detail, error) {
 	var d Detail
 	if it.Kind == Issue {
-		out, err := run("issue", "view", num(it), "-R", it.Repo, "--json", "body,comments")
+		out, err := read("issue", "view", num(it), "-R", it.Repo, "--json", "body,comments")
 		if err != nil {
 			return d, err
 		}
@@ -300,7 +300,7 @@ func GetDetail(it Item) (Detail, error) {
 		d.Body, d.Comments = raw.Body, comments(raw.Comments)
 		return d, nil
 	}
-	out, err := run("pr", "view", num(it), "-R", it.Repo, "--json",
+	out, err := read("pr", "view", num(it), "-R", it.Repo, "--json",
 		"body,comments,reviews,reviewRequests,statusCheckRollup,changedFiles")
 	if err != nil {
 		return d, err
@@ -357,7 +357,7 @@ func GetDetail(it Item) (Detail, error) {
 
 // Diff is the PR's patch.
 func Diff(it Item) (string, error) {
-	out, err := run("pr", "diff", num(it), "-R", it.Repo, "--color=never")
+	out, err := read("pr", "diff", num(it), "-R", it.Repo, "--color=never")
 	return string(out), err
 }
 
@@ -372,7 +372,7 @@ type BranchPR struct {
 
 // BranchPRs maps head branch name to its most recent PR in repo.
 func BranchPRs(slug string) (map[string]BranchPR, error) {
-	out, err := run("pr", "list", "-R", slug, "--state", "all", "--limit", "60",
+	out, err := read("pr", "list", "-R", slug, "--state", "all", "--limit", "60",
 		"--json", "number,headRefName,state,isDraft,url")
 	if err != nil {
 		return nil, err
@@ -400,10 +400,15 @@ func BranchPRs(slug string) (map[string]BranchPR, error) {
 
 func num(it Item) string { return strconv.Itoa(it.Number) }
 
+// Clone clones slug into dest with gh, so gh's auth and protocol apply.
+func Clone(slug, dest string) proc.Result {
+	return run(filepath.Dir(dest), "repo", "clone", slug, dest)
+}
+
 // Checkout checks a PR out with gh. Once a merged PR's branch is deleted gh
 // can't find it, so fall back to GitHub's permanent refs/pull/N/head.
-func Checkout(dir string, it Item) git.Result {
-	r := git.RunCmd(dir, "gh", "pr", "checkout", num(it), "-R", it.Repo)
+func Checkout(dir string, it Item) proc.Result {
+	r := run(dir, "pr", "checkout", num(it), "-R", it.Repo)
 	if r.Err == nil || !strings.Contains(r.Output, "couldn't find remote ref") {
 		return r
 	}
@@ -420,27 +425,27 @@ func Checkout(dir string, it Item) git.Result {
 	return git.Checkout(dir, branch)
 }
 
-func Approve(it Item) git.Result {
-	return git.RunCmd("", "gh", "pr", "review", num(it), "-R", it.Repo, "--approve")
+func Approve(it Item) proc.Result {
+	return run("", "pr", "review", num(it), "-R", it.Repo, "--approve")
 }
 
-func CommentOn(it Item, body string) git.Result {
-	return git.RunCmd("", "gh", it.Kind.String(), "comment", num(it), "-R", it.Repo, "--body", body)
+func CommentOn(it Item, body string) proc.Result {
+	return run("", it.Kind.String(), "comment", num(it), "-R", it.Repo, "--body", body)
 }
 
 // Merge merges with method "merge", "squash" or "rebase".
-func Merge(it Item, method string) git.Result {
-	return git.RunCmd("", "gh", "pr", "merge", num(it), "-R", it.Repo, "--"+method)
+func Merge(it Item, method string) proc.Result {
+	return run("", "pr", "merge", num(it), "-R", it.Repo, "--"+method)
 }
 
-func Close(it Item) git.Result {
-	return git.RunCmd("", "gh", it.Kind.String(), "close", num(it), "-R", it.Repo)
+func Close(it Item) proc.Result {
+	return run("", it.Kind.String(), "close", num(it), "-R", it.Repo)
 }
 
-func Reopen(it Item) git.Result {
-	return git.RunCmd("", "gh", it.Kind.String(), "reopen", num(it), "-R", it.Repo)
+func Reopen(it Item) proc.Result {
+	return run("", it.Kind.String(), "reopen", num(it), "-R", it.Repo)
 }
 
-func MarkReady(it Item) git.Result {
-	return git.RunCmd("", "gh", "pr", "ready", num(it), "-R", it.Repo)
+func MarkReady(it Item) proc.Result {
+	return run("", "pr", "ready", num(it), "-R", it.Repo)
 }

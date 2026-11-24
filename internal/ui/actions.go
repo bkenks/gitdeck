@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/bkenks/gitdeck/internal/git"
+	"github.com/bkenks/gitdeck/internal/proc"
 )
 
 // ─── Handing the terminal to other programs ─────────────────────────────────
@@ -24,7 +25,7 @@ func (a *App) openLazygit(dir string, args ...string) tea.Cmd {
 	cmd := exec.Command(a.cfg.Lazygit.Command, argv...)
 	cmd.Dir = dir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return execDoneMsg{err: err, dir: dir, what: git.Display("lazygit", args...)}
+		return execDoneMsg{err: err, dir: dir, what: proc.Display("lazygit", args...)}
 	})
 }
 
@@ -133,7 +134,7 @@ func (a *App) copy(text string) tea.Cmd {
 			}
 			cmd := exec.Command(c[0], c[1:]...)
 			cmd.Stdin = strings.NewReader(text)
-			git.Detach(cmd)
+			proc.Detach(cmd)
 			if cmd.Run() == nil {
 				break
 			}
@@ -154,9 +155,9 @@ func openURL(url string) tea.Cmd {
 		default:
 			cmd = exec.Command("xdg-open", url)
 		}
-		git.Detach(cmd)
+		proc.Detach(cmd)
 		if err := cmd.Start(); err != nil {
-			return resultMsg{res: git.Result{Cmd: "open " + url, Err: err}}
+			return resultMsg{res: proc.Result{Cmd: "open " + url, Err: err}}
 		}
 		go func() { _ = cmd.Wait() }()
 		return nil
