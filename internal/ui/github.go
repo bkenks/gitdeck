@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -169,16 +170,18 @@ func (g *ghState) detail(key string) *detailData {
 }
 
 func (g *ghState) refilterAll() {
-	g.refilter(&g.prs)
-	g.refilter(&g.issues)
+	g.prs.list.refilter()
+	g.issues.list.refilter()
 }
 
-func (g *ghState) refilter(p *ghPanel) {
-	items := g.items(p)
-	p.list.refilter(len(items), func(i int) string {
-		it := items[i]
-		return it.Repo + " #" + itoa(it.Number) + " " + it.Title + " " + it.Author + " " + it.Head
-	})
+// ghListItems are a section's items for a list, by Item.Key.
+func ghListItems(its []gh.Item) []item {
+	items := make([]item, len(its))
+	for i, it := range its {
+		text := it.Repo + " #" + itoa(it.Number) + " " + it.Title + " " + it.Author + " " + it.Head
+		items[i] = item{id: it.Key(), text: text}
+	}
+	return items
 }
 
 func (g *ghState) invalidatePreview() { g.previewFor = "" }
@@ -789,8 +792,7 @@ func (a *App) ghKey(key string) (bool, tea.Cmd) {
 		}
 		p.tab = (p.tab + d + n) % n
 		p.list.reset()
-		p.list.filter = ""
-		a.gh.refilter(p)
+		p.list.refilter()
 		return true, tea.Batch(a.ghFetch(p, false), a.ghEnsureDetail())
 	case "s":
 		a.openGHSearch()
@@ -905,7 +907,7 @@ func (a *App) openGHSearch() {
 			p.tab = len(a.gh.sections(p.kind)) - 1
 		}
 		p.list.reset()
-		a.gh.refilter(p)
+		p.list.refilter()
 		return tea.Batch(a.ghFetch(p, true), a.ghEnsureDetail())
 	})
 }
@@ -981,19 +983,16 @@ func (a *App) showCheckout(path string, cloned, lazy bool) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// selectRepoPath puts the cursor on a repo and loads it.
+// selectRepoPath puts the cursor on a repo, clearing the filter if it hides
+// the repo, and loads it.
 func (a *App) selectRepoPath(path string) tea.Cmd {
-	for i := range a.repos {
-		if a.repos[i].Path != path {
-			continue
-		}
-		if !a.reposL.selectIndex(i) {
-			a.reposL.filter = ""
-			a.refilterRepos()
-			a.reposL.selectIndex(i)
-		}
-		a.cur = nil
-		return tea.Batch(a.onRepoCursor(), a.loadStats(path))
+	if !slices.ContainsFunc(a.repos, func(r git.Repo) bool { return r.Path == path }) {
+		return nil
 	}
-	return nil
+	if !a.reposL.selectID(path) {
+		a.reposL.setFilter("")
+		a.reposL.selectID(path)
+	}
+	a.cur = nil
+	return tea.Batch(a.onRepoCursor(), a.loadStats(path))
 }

@@ -155,11 +155,7 @@ func (a *App) reposKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		i := slices.Index(sortModes, a.cfg.SortMode)
 		a.cfg.SortMode = sortModes[(i+1)%len(sortModes)]
 		_ = a.cfg.Save()
-		keep := ""
-		if repo != nil {
-			keep = repo.Path
-		}
-		a.sortRepos(keep)
+		a.sortRepos()
 		return true, a.flash("Sorted by "+a.cfg.SortMode, false)
 	case "y":
 		if repo != nil {
@@ -230,7 +226,7 @@ func (a *App) filesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		}
 		if row.dir {
 			a.collapsed[row.path] = !a.collapsed[row.path]
-			a.rebuildFiles()
+			a.filesL.refilter()
 			return true, nil
 		}
 		a.setFocus(pMain)
@@ -252,8 +248,7 @@ func (a *App) branchesKey(key string, repo *git.Repo) (bool, tea.Cmd) {
 		}
 		a.branchTab = (a.branchTab + d + len(branchTabs)) % len(branchTabs)
 		a.branchesL.reset()
-		a.branchesL.filter = ""
-		a.refilterBranches()
+		a.branchesL.refilter()
 		return true, a.syncMain()
 	case "n":
 		a.openNewBranch(dir)

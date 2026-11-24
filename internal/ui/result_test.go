@@ -20,11 +20,13 @@ import (
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", "/dev/null")
-	return &App{
+	a := &App{
 		state:     config.State{LastUsed: map[string]time.Time{}},
 		collapsed: map[string]bool{},
 		gh:        newGHState(config.Config{}),
 	}
+	a.bindLists()
+	return a
 }
 
 type wantLog struct{ repo, cmd, err string }

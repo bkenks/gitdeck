@@ -54,9 +54,24 @@ func TestRenderRowFits(t *testing.T) {
 	}
 }
 
+// listOf is a list over items whose ids are their text.
+func listOf(texts *[]string) list {
+	return list{source: func() []item {
+		items := make([]item, len(*texts))
+		for i, t := range *texts {
+			items[i] = item{id: t, text: t}
+		}
+		return items
+	}}
+}
+
 func TestListWindowKeepsCursorVisible(t *testing.T) {
-	var l list
-	l.refilter(100, func(i int) string { return itoa(i) })
+	var texts []string
+	for i := range 100 {
+		texts = append(texts, itoa(i))
+	}
+	l := listOf(&texts)
+	l.refilter()
 	for _, c := range []int{0, 5, 50, 99, 3} {
 		l.cursor = c
 		from, to := l.window(10)
@@ -68,19 +83,57 @@ func TestListWindowKeepsCursorVisible(t *testing.T) {
 
 func TestRefilterKeepsSelection(t *testing.T) {
 	items := []string{"alpha", "beta", "gamma", "delta"}
-	var l list
-	text := func(i int) string { return items[i] }
-	l.refilter(len(items), text)
-	l.cursor = 2 // gamma
+	l := listOf(&items)
+	l.refilter()
+	l.cursor = 2
 	l.filter = "a"
-	l.refilter(len(items), text)
-	if items[l.sel()] != "gamma" {
-		t.Errorf("selection moved to %q", items[l.sel()])
+	l.refilter()
+	if l.selectedID() != "gamma" {
+		t.Errorf("filtering moved the selection to %q", l.selectedID())
 	}
+
+	l.filter = ""
+	items = []string{"delta", "gamma", "alpha"}
+	l.refilter()
+	if l.selectedID() != "gamma" || l.cursor != 1 {
+		t.Errorf("reordering moved the selection to %q at %d", l.selectedID(), l.cursor)
+	}
+
+	items = []string{"delta", "alpha"}
+	l.refilter()
+	if l.selectedID() != "alpha" || l.cursor != 1 {
+		t.Errorf("a removed item should leave the cursor in place, got %q at %d", l.selectedID(), l.cursor)
+	}
+
 	l.filter = "zzz"
-	l.refilter(len(items), text)
-	if l.sel() != -1 {
-		t.Errorf("empty view should select nothing, got %d", l.sel())
+	l.refilter()
+	if l.sel() != -1 || l.selectedID() != "" {
+		t.Errorf("empty view should select nothing, got %d %q", l.sel(), l.selectedID())
+	}
+}
+
+func TestListFilterIgnoresCaseAndOuterSpace(t *testing.T) {
+	items := []string{"Alpha", "beta"}
+	l := listOf(&items)
+	l.setFilter("  AL ")
+	if l.len() != 1 || l.selectedID() != "Alpha" {
+		t.Errorf("filter %q shows %d, selects %q", l.filter, l.len(), l.selectedID())
+	}
+}
+
+func TestListResetForgetsSelection(t *testing.T) {
+	items := []string{"alpha", "beta", "gamma"}
+	l := listOf(&items)
+	l.refilter()
+	l.setFilter("a")
+	l.cursor, l.offset = 2, 1
+	l.reset()
+	if l.filter != "" || l.cursor != 0 || l.offset != 0 || l.len() != 0 {
+		t.Errorf("reset left filter %q cursor %d offset %d len %d", l.filter, l.cursor, l.offset, l.len())
+	}
+	l.refilter()
+	if l.selectedID() != "alpha" || l.len() != 3 {
+		t.Errorf("after reset: %q of %d", l.selectedID(), l.len())
 	}
 }
 

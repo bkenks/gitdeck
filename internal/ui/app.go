@@ -131,10 +131,22 @@ func New(cfg config.Config, opts Options) *App {
 	_, err := exec.LookPath(cfg.Lazygit.Command)
 	a.hasLazygit = err == nil
 	a.gh = newGHState(cfg)
+	a.bindLists()
 	if opts.GitHub {
 		a.mode, a.focus = modeGitHub, pPRs
 	}
 	return a
+}
+
+// bindLists points each list at the items it shows.
+func (a *App) bindLists() {
+	a.reposL.source = a.repoItems
+	a.filesL.source, a.filesL.prefiltered = a.fileItems, true
+	a.branchesL.source = a.branchItems
+	a.commitsL.source = a.commitItems
+	a.stashL.source = a.stashItems
+	a.gh.prs.list.source = func() []item { return ghListItems(a.gh.items(&a.gh.prs)) }
+	a.gh.issues.list.source = func() []item { return ghListItems(a.gh.items(&a.gh.issues)) }
 }
 
 // ─── Messages ───────────────────────────────────────────────────────────────
@@ -606,27 +618,8 @@ func (a *App) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 
 // setFilter replaces the focused list's filter and refilters it.
 func (a *App) setFilter(q string) {
-	l := a.listFor(a.focus)
-	if l == nil {
-		return
-	}
-	l.filter = q
-	l.cursor = 0
-	switch a.focus {
-	case pRepos:
-		a.refilterRepos()
-	case pFiles:
-		a.rebuildFiles()
-	case pBranches:
-		a.refilterBranches()
-	case pCommits:
-		a.refilterCommits()
-	case pStash:
-		a.refilterStash()
-	case pPRs:
-		a.gh.refilter(&a.gh.prs)
-	case pIssues:
-		a.gh.refilter(&a.gh.issues)
+	if l := a.listFor(a.focus); l != nil {
+		l.setFilter(q)
 	}
 }
 

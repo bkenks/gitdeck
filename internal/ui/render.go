@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -207,29 +208,54 @@ func (p Panel) Render() string {
 
 // ─── Lists ──────────────────────────────────────────────────────────────────
 
-// list is the cursor, scroll and filter state of a selectable panel. view
-// holds the indices of the underlying items that pass the filter.
+// item is one entry behind a list: id keeps the cursor on it across
+// reloads and re-sorts, and text is what the filter matches.
+type item struct {
+	id, text string
+}
+
+// list is the cursor, scroll and filter state of a selectable panel over
+// the items source returns. view holds the indices of the items that pass
+// the filter, and ids their ids, as of the last refilter.
 type list struct {
+	source func() []item
+	// prefiltered lists show every item because source applies the filter
+	// itself: the files tree filters paths before it builds its rows.
+	prefiltered    bool
 	cursor, offset int
 	filter         string
 	view           []int
+	ids            []string
 }
 
-// refilter rebuilds view for n items. text gives each item's searchable text.
-// The cursor stays on the same underlying item when it survives.
-func (l *list) refilter(n int, text func(i int) string) {
-	prev := l.sel()
-	l.view = l.view[:0]
+// matches reports whether text passes the filter.
+func (l *list) matches(text string) bool {
 	q := strings.ToLower(strings.TrimSpace(l.filter))
-	for i := 0; i < n; i++ {
-		if q == "" || fuzzy(strings.ToLower(text(i)), q) {
+	return q == "" || fuzzy(strings.ToLower(text), q)
+}
+
+// refilter rebuilds view from source. The cursor stays on the same item
+// when it survives, and holds its place when it doesn't.
+func (l *list) refilter() {
+	prev := l.selectedID()
+	l.view, l.ids = l.view[:0], l.ids[:0]
+	for i, it := range l.source() {
+		if l.prefiltered || l.matches(it.text) {
 			l.view = append(l.view, i)
+			l.ids = append(l.ids, it.id)
 		}
 	}
-	if prev >= 0 {
-		l.selectIndex(prev)
+	if prev != "" {
+		l.selectID(prev)
 	}
 	l.clamp()
+}
+
+// setFilter replaces the filter and refilters from the top: the cursor
+// stays on the first item showing before, if it still matches.
+func (l *list) setFilter(q string) {
+	l.filter, l.cursor = q, 0
+	l.refilter()
 }
 
 // sel is the underlying index under the cursor, or -1.
@@ -238,6 +264,14 @@ func (l *list) sel() int {
 		return -1
 	}
 	return l.view[l.cursor]
+}
+
+// selectedID is the id of the item under the cursor, or "".
+func (l *list) selectedID() string {
+	if l.cursor < 0 || l.cursor >= len(l.ids) {
+		return ""
+	}
+	return l.ids[l.cursor]
 }
 
 func (l *list) len() int { return len(l.view) }
@@ -256,17 +290,20 @@ func (l *list) move(d int) {
 	l.clamp()
 }
 
-func (l *list) reset() { l.cursor, l.offset = 0, 0 }
+// reset starts the list over: unfiltered, at the top, with no selection
+// for the next refilter to keep.
+func (l *list) reset() {
+	l.cursor, l.offset, l.filter = 0, 0, ""
+	l.view, l.ids = l.view[:0], l.ids[:0]
+}
 
-// selectIndex moves the cursor to underlying item i, if visible.
-func (l *list) selectIndex(i int) bool {
-	for vi, x := range l.view {
-		if x == i {
-			l.cursor = vi
-			return true
-		}
+// selectID moves the cursor to the item with id, if it's showing.
+func (l *list) selectID(id string) bool {
+	i := slices.Index(l.ids, id)
+	if i >= 0 {
+		l.cursor = i
 	}
-	return false
+	return i >= 0
 }
 
 // window scrolls so the cursor is visible in h rows and returns the visible

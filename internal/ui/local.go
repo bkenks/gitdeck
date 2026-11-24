@@ -78,14 +78,12 @@ func (a *App) scan() tea.Cmd {
 func (a *App) onScanned(msg scannedMsg) tea.Cmd {
 	a.scanning = false
 	a.scanErr = msg.err
-	prev := ""
-	if r := a.selectedRepo(); r != nil {
-		prev = r.Path
-	} else if a.opts.Cwd != "" {
-		prev = a.opts.Cwd
-	}
-	if a.selectAfterScan != "" {
-		prev, a.selectAfterScan = a.selectAfterScan, ""
+	// refilter keeps the cursor on its repo. A pending selection overrides
+	// that, and so does the launch repo while nothing is selected yet.
+	want := a.selectAfterScan
+	a.selectAfterScan = ""
+	if want == "" && a.selectedRepo() == nil {
+		want = a.opts.Cwd
 	}
 	old := map[string]git.Repo{}
 	for _, r := range a.repos {
@@ -101,7 +99,10 @@ func (a *App) onScanned(msg scannedMsg) tea.Cmd {
 			unloaded = append(unloaded, a.repos[i].Path)
 		}
 	}
-	a.sortRepos(prev)
+	a.sortRepos()
+	if want != "" {
+		a.reposL.selectID(want)
+	}
 	return tea.Batch(a.loadAllStats(unloaded), a.onRepoCursor(), a.syncMain())
 }
 
@@ -147,14 +148,13 @@ func (a *App) onStats(msg statsMsg) tea.Cmd {
 			a.repos[i].Stats, a.repos[i].Loaded = s, true
 		}
 	}
+	// Only a bulk stats load re-sorts. One repo's stats can still bring a
+	// new slug, which the filter matches on.
 	if len(msg) > 1 {
-		prev := ""
-		if r := a.selectedRepo(); r != nil {
-			prev = r.Path
-		}
-		a.sortRepos(prev)
+		a.sortRepos()
+	} else {
+		a.reposL.refilter()
 	}
-	a.refilterRepos()
 	// The selected repo's GitHub slug may only now be known.
 	return a.ghBranchPRs(a.selectedRepo())
 }
@@ -191,7 +191,6 @@ func (a *App) onRepoCursor() tea.Cmd {
 	a.branchesL.reset()
 	a.commitsL.reset()
 	a.stashL.reset()
-	a.filesL.filter, a.branchesL.filter, a.commitsL.filter, a.stashL.filter = "", "", "", ""
 	a.collapsed = map[string]bool{}
 	a.rebuildDetail()
 	path := r.Path
@@ -223,10 +222,10 @@ func (a *App) onRepo(d *repoData) tea.Cmd {
 }
 
 func (a *App) rebuildDetail() {
-	a.rebuildFiles()
-	a.refilterBranches()
-	a.refilterCommits()
-	a.refilterStash()
+	a.filesL.refilter()
+	a.branchesL.refilter()
+	a.commitsL.refilter()
+	a.stashL.refilter()
 }
 
 // ─── Repos ──────────────────────────────────────────────────────────────────
@@ -269,7 +268,7 @@ func (a *App) recency(r git.Repo) time.Time {
 
 var sortModes = []string{"recent", "name", "namespace"}
 
-func (a *App) sortRepos(keep string) {
+func (a *App) sortRepos() {
 	mode := a.cfg.SortMode
 	sort.SliceStable(a.repos, func(i, j int) bool {
 		ri, rj := a.repos[i], a.repos[j]
@@ -285,19 +284,15 @@ func (a *App) sortRepos(keep string) {
 			return a.recency(ri).After(a.recency(rj))
 		}
 	})
-	a.refilterRepos()
-	if keep != "" {
-		for i := range a.repos {
-			if a.repos[i].Path == keep {
-				a.reposL.selectIndex(i)
-				break
-			}
-		}
-	}
+	a.reposL.refilter()
 }
 
-func (a *App) refilterRepos() {
-	a.reposL.refilter(len(a.repos), func(i int) string { return a.repos[i].Key + " " + a.repos[i].Stats.Slug })
+func (a *App) repoItems() []item {
+	items := make([]item, len(a.repos))
+	for i, r := range a.repos {
+		items[i] = item{id: r.Path, text: r.Key + " " + r.Stats.Slug}
+	}
+	return items
 }
 
 func (a *App) touch(path string) {
@@ -340,32 +335,23 @@ func (a *App) repoRow(i int) Row {
 
 // ─── Files ──────────────────────────────────────────────────────────────────
 
-func (a *App) rebuildFiles() {
-	prev := ""
-	if i := a.filesL.sel(); i >= 0 && i < len(a.fileRows) {
-		prev = a.fileRows[i].path
-	}
-	a.fileRows = a.fileRows[:0]
-	if a.cur == nil {
-		a.filesL.view = a.filesL.view[:0]
-		return
-	}
-	q := strings.ToLower(a.filesL.filter)
+// fileItems rebuilds the files tree from the changed paths that pass the
+// filter, so a directory row only holds its matching files.
+func (a *App) fileItems() []item {
 	var files []git.File
-	for _, f := range a.cur.status.Files {
-		if q == "" || fuzzy(strings.ToLower(f.Path), q) {
-			files = append(files, f)
+	if a.cur != nil {
+		for _, f := range a.cur.status.Files {
+			if a.filesL.matches(f.Path) {
+				files = append(files, f)
+			}
 		}
 	}
 	a.fileRows = buildTree(files, a.collapsed)
-	a.filesL.view = a.filesL.view[:0]
-	for i := range a.fileRows {
-		a.filesL.view = append(a.filesL.view, i)
-		if a.fileRows[i].path == prev {
-			a.filesL.cursor = i
-		}
+	items := make([]item, len(a.fileRows))
+	for i, r := range a.fileRows {
+		items[i] = item{id: r.path}
 	}
-	a.filesL.clamp()
+	return items
 }
 
 type treeNode struct {
@@ -510,38 +496,50 @@ func allStaged(fs []git.File) bool {
 
 // ─── Branches, commits, stash ──────────────────────────────────────────────
 
-func (a *App) refilterBranches() {
+// branchItems are the refs on the current branch tab, by name.
+func (a *App) branchItems() []item {
 	if a.cur == nil {
-		a.branchesL.view = a.branchesL.view[:0]
-		return
+		return nil
 	}
+	var items []item
 	switch a.branchTab {
 	case 0:
-		a.branchesL.refilter(len(a.cur.branches), func(i int) string { return a.cur.branches[i].Name })
+		for _, b := range a.cur.branches {
+			items = append(items, item{id: b.Name, text: b.Name})
+		}
 	case 1:
-		a.branchesL.refilter(len(a.cur.remotes), func(i int) string { return a.cur.remotes[i].Name })
+		for _, b := range a.cur.remotes {
+			items = append(items, item{id: b.Name, text: b.Name})
+		}
 	default:
-		a.branchesL.refilter(len(a.cur.tags), func(i int) string { return a.cur.tags[i].Name + " " + a.cur.tags[i].Subject })
+		for _, t := range a.cur.tags {
+			items = append(items, item{id: t.Name, text: t.Name + " " + t.Subject})
+		}
 	}
+	return items
 }
 
-func (a *App) refilterCommits() {
+func (a *App) commitItems() []item {
 	if a.cur == nil {
-		a.commitsL.view = a.commitsL.view[:0]
-		return
+		return nil
 	}
-	a.commitsL.refilter(len(a.cur.commits), func(i int) string {
-		c := a.cur.commits[i]
-		return c.Short + " " + c.Author + " " + c.Subject + " " + strings.Join(c.Tags, " ")
-	})
+	items := make([]item, len(a.cur.commits))
+	for i, c := range a.cur.commits {
+		text := c.Short + " " + c.Author + " " + c.Subject + " " + strings.Join(c.Tags, " ")
+		items[i] = item{id: c.Hash, text: text}
+	}
+	return items
 }
 
-func (a *App) refilterStash() {
+func (a *App) stashItems() []item {
 	if a.cur == nil {
-		a.stashL.view = a.stashL.view[:0]
-		return
+		return nil
 	}
-	a.stashL.refilter(len(a.cur.stashes), func(i int) string { return a.cur.stashes[i].Message })
+	items := make([]item, len(a.cur.stashes))
+	for i, st := range a.cur.stashes {
+		items[i] = item{id: st.Ref, text: st.Message}
+	}
+	return items
 }
 
 func branchColor(name string) lipgloss.Style {
@@ -615,18 +613,8 @@ func aheadBehind(ahead, behind int) string {
 
 // selectedRef is the name under the cursor in the branches panel's tab.
 func (a *App) selectedRef() (string, bool) {
-	i := a.branchesL.sel()
-	if a.cur == nil || i < 0 {
-		return "", false
-	}
-	switch a.branchTab {
-	case 0:
-		return a.cur.branches[i].Name, true
-	case 1:
-		return a.cur.remotes[i].Name, true
-	default:
-		return a.cur.tags[i].Name, true
-	}
+	name := a.branchesL.selectedID()
+	return name, name != ""
 }
 
 func prBadge(pr gh.BranchPR) []Seg {
