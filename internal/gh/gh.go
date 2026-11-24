@@ -29,6 +29,64 @@ func (k Kind) String() string {
 	return "issue"
 }
 
+// Plural names the kind in prose: "pull requests" or "issues".
+func (k Kind) Plural() string {
+	if k == PR {
+		return "pull requests"
+	}
+	return "issues"
+}
+
+// State is a PR or issue state as GitHub reports it.
+type State string
+
+const (
+	StateOpen   State = "OPEN"
+	StateClosed State = "CLOSED"
+	StateMerged State = "MERGED"
+)
+
+// CheckState is the rollup of a PR's latest commit status checks.
+type CheckState string
+
+const (
+	CheckSuccess  CheckState = "SUCCESS"
+	CheckFailure  CheckState = "FAILURE"
+	CheckError    CheckState = "ERROR"
+	CheckPending  CheckState = "PENDING"
+	CheckExpected CheckState = "EXPECTED"
+)
+
+// ReviewDecision is a PR's overall review status.
+type ReviewDecision string
+
+const (
+	DecisionApproved         ReviewDecision = "APPROVED"
+	DecisionChangesRequested ReviewDecision = "CHANGES_REQUESTED"
+	DecisionReviewRequired   ReviewDecision = "REVIEW_REQUIRED"
+)
+
+// ReviewState is one reviewer's verdict.
+type ReviewState string
+
+const (
+	ReviewApproved         ReviewState = "APPROVED"
+	ReviewChangesRequested ReviewState = "CHANGES_REQUESTED"
+	ReviewCommented        ReviewState = "COMMENTED"
+	ReviewDismissed        ReviewState = "DISMISSED"
+	ReviewPending          ReviewState = "PENDING"
+)
+
+// Outcome is what a single check means for the PR.
+type Outcome string
+
+const (
+	OutcomePass    Outcome = "pass"
+	OutcomeFail    Outcome = "fail"
+	OutcomePending Outcome = "pending"
+	OutcomeSkip    Outcome = "skip"
+)
+
 type Label struct {
 	Name  string `json:"name"`
 	Color string `json:"color"`
@@ -40,7 +98,7 @@ type Item struct {
 	Number         int
 	Title          string
 	URL            string
-	State          string // OPEN, CLOSED, MERGED
+	State          State
 	Draft          bool
 	Repo           string // owner/name
 	Author         string
@@ -50,8 +108,8 @@ type Item struct {
 	Deletions      int
 	Comments       int
 	Labels         []Label
-	ReviewDecision string // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED
-	Checks         string // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED
+	ReviewDecision ReviewDecision
+	Checks         CheckState
 	Head, Base     string
 	Assignees      []string
 }
@@ -115,18 +173,18 @@ const searchQuery = `query($q: String!, $n: Int!) {
 }`
 
 type searchNode struct {
-	Number         int       `json:"number"`
-	Title          string    `json:"title"`
-	URL            string    `json:"url"`
-	State          string    `json:"state"`
-	IsDraft        bool      `json:"isDraft"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
-	Additions      int       `json:"additions"`
-	Deletions      int       `json:"deletions"`
-	HeadRefName    string    `json:"headRefName"`
-	BaseRefName    string    `json:"baseRefName"`
-	ReviewDecision string    `json:"reviewDecision"`
+	Number         int            `json:"number"`
+	Title          string         `json:"title"`
+	URL            string         `json:"url"`
+	State          State          `json:"state"`
+	IsDraft        bool           `json:"isDraft"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
+	Additions      int            `json:"additions"`
+	Deletions      int            `json:"deletions"`
+	HeadRefName    string         `json:"headRefName"`
+	BaseRefName    string         `json:"baseRefName"`
+	ReviewDecision ReviewDecision `json:"reviewDecision"`
 	Author         struct {
 		Login string `json:"login"`
 	} `json:"author"`
@@ -148,7 +206,7 @@ type searchNode struct {
 		Nodes []struct {
 			Commit struct {
 				StatusCheckRollup *struct {
-					State string `json:"state"`
+					State CheckState `json:"state"`
 				} `json:"statusCheckRollup"`
 			} `json:"commit"`
 		} `json:"nodes"`
@@ -211,29 +269,29 @@ type Check struct {
 	Conclusion string // SUCCESS, FAILURE, SKIPPED, NEUTRAL, CANCELLED...
 }
 
-// Outcome folds CheckRuns and StatusContexts into one word:
-// pass, fail, pending or skip.
-func (c Check) Outcome() string {
+// Outcome folds CheckRun conclusions and StatusContext states into one
+// Outcome. A CheckRun without a conclusion is still running.
+func (c Check) Outcome() Outcome {
 	switch strings.ToUpper(c.Conclusion) {
 	case "SUCCESS":
-		return "pass"
+		return OutcomePass
 	case "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE":
-		return "fail"
+		return OutcomeFail
 	case "SKIPPED", "NEUTRAL", "STALE":
-		return "skip"
+		return OutcomeSkip
 	}
-	switch strings.ToUpper(c.Status) {
-	case "SUCCESS":
-		return "pass"
-	case "FAILURE", "ERROR":
-		return "fail"
+	switch CheckState(strings.ToUpper(c.Status)) {
+	case CheckSuccess:
+		return OutcomePass
+	case CheckFailure, CheckError:
+		return OutcomeFail
 	}
-	return "pending"
+	return OutcomePending
 }
 
 type Review struct {
 	Author string
-	State  string
+	State  ReviewState
 	At     time.Time
 }
 
@@ -309,9 +367,9 @@ func GetDetail(it Item) (Detail, error) {
 		Body     string       `json:"body"`
 		Comments []rawComment `json:"comments"`
 		Reviews  []struct {
-			Author      actor     `json:"author"`
-			State       string    `json:"state"`
-			SubmittedAt time.Time `json:"submittedAt"`
+			Author      actor       `json:"author"`
+			State       ReviewState `json:"state"`
+			SubmittedAt time.Time   `json:"submittedAt"`
 		} `json:"reviews"`
 		ReviewRequests    []actor `json:"reviewRequests"`
 		StatusCheckRollup []struct {
@@ -331,7 +389,7 @@ func GetDetail(it Item) (Detail, error) {
 	d.Body, d.ChangedFiles, d.Comments = raw.Body, raw.ChangedFiles, comments(raw.Comments)
 	latest := map[string]int{}
 	for _, r := range raw.Reviews {
-		if r.State == "COMMENTED" || r.State == "PENDING" {
+		if r.State == ReviewCommented || r.State == ReviewPending {
 			continue
 		}
 		rv := Review{Author: r.Author.String(), State: r.State, At: r.SubmittedAt}
@@ -365,7 +423,7 @@ func Diff(it Item) (string, error) {
 // panel.
 type BranchPR struct {
 	Number int
-	State  string
+	State  State
 	Draft  bool
 	URL    string
 }
@@ -380,7 +438,7 @@ func BranchPRs(slug string) (map[string]BranchPR, error) {
 	var raw []struct {
 		Number      int    `json:"number"`
 		HeadRefName string `json:"headRefName"`
-		State       string `json:"state"`
+		State       State  `json:"state"`
 		IsDraft     bool   `json:"isDraft"`
 		URL         string `json:"url"`
 	}

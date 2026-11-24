@@ -634,9 +634,9 @@ func prBadge(pr gh.BranchPR) []Seg {
 	switch {
 	case pr.Draft:
 		st = T.Dim
-	case pr.State == "MERGED":
+	case pr.State == gh.StateMerged:
 		st = T.Magenta
-	case pr.State == "CLOSED":
+	case pr.State == gh.StateClosed:
 		st = T.Red
 	}
 	return []Seg{S("#"+itoa(pr.Number), st)}

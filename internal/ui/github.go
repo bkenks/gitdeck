@@ -205,7 +205,7 @@ func (g *ghState) openPRCount(r *git.Repo) int {
 	}
 	n := 0
 	for _, pr := range g.branchPRs[r.Stats.Slug] {
-		if pr.State == "OPEN" {
+		if pr.State == gh.StateOpen {
 			n++
 		}
 	}
@@ -390,15 +390,15 @@ func (a *App) ghUpdate(msg tea.Msg) tea.Cmd {
 
 func stateOf(it gh.Item) (glyph, label string, st lipgloss.Style) {
 	if it.Kind == gh.Issue {
-		if it.State == "CLOSED" {
+		if it.State == gh.StateClosed {
 			return "✔", "Closed", T.Magenta
 		}
 		return "○", "Open", T.Green
 	}
 	switch {
-	case it.State == "MERGED":
+	case it.State == gh.StateMerged:
 		return "◆", "Merged", T.Magenta
-	case it.State == "CLOSED":
+	case it.State == gh.StateClosed:
 		return "✕", "Closed", T.Red
 	case it.Draft:
 		return "◌", "Draft", T.Dim
@@ -406,25 +406,25 @@ func stateOf(it gh.Item) (glyph, label string, st lipgloss.Style) {
 	return "●", "Open", T.Green
 }
 
-func checksSeg(state string) Seg {
+func checksSeg(state gh.CheckState) Seg {
 	switch state {
-	case "SUCCESS":
+	case gh.CheckSuccess:
 		return S("✓", T.Green)
-	case "FAILURE", "ERROR":
+	case gh.CheckFailure, gh.CheckError:
 		return S("✗", T.Red)
-	case "PENDING", "EXPECTED":
+	case gh.CheckPending, gh.CheckExpected:
 		return S("●", T.Yellow)
 	}
 	return S(" ", T.Fg)
 }
 
-func reviewSeg(decision string) []Seg {
+func reviewSeg(decision gh.ReviewDecision) []Seg {
 	switch decision {
-	case "APPROVED":
+	case gh.DecisionApproved:
 		return []Seg{S("approved ", T.Green)}
-	case "CHANGES_REQUESTED":
+	case gh.DecisionChangesRequested:
 		return []Seg{S("changes ", T.Red)}
-	case "REVIEW_REQUIRED":
+	case gh.DecisionReviewRequired:
 		return []Seg{S("review ", T.Yellow)}
 	}
 	return nil
@@ -587,11 +587,11 @@ func checksSection(checks []gh.Check, width int) []string {
 	var failing, pending []gh.Check
 	for _, c := range checks {
 		switch c.Outcome() {
-		case "pass":
+		case gh.OutcomePass:
 			pass++
-		case "fail":
+		case gh.OutcomeFail:
 			failing = append(failing, c)
-		case "pending":
+		case gh.OutcomePending:
 			pending = append(pending, c)
 		}
 	}
@@ -606,7 +606,7 @@ func checksSection(checks []gh.Check, width int) []string {
 			break
 		}
 		g, s := "✗", T.Red
-		if c.Outcome() == "pending" {
+		if c.Outcome() == gh.OutcomePending {
 			g, s = "●", T.Yellow
 		}
 		line := "  " + s.Render(g) + " " + c.Name
@@ -628,13 +628,13 @@ func reviewsSection(dd gh.Detail, width int) []string {
 	}
 	out := []string{"", rule("Reviews", width)}
 	for _, r := range dd.Reviews {
-		g, s, word := "●", T.Dim, strings.ToLower(strings.ReplaceAll(r.State, "_", " "))
+		g, s, word := "●", T.Dim, strings.ToLower(strings.ReplaceAll(string(r.State), "_", " "))
 		switch r.State {
-		case "APPROVED":
+		case gh.ReviewApproved:
 			g, s, word = "✓", T.Green, "approved"
-		case "CHANGES_REQUESTED":
+		case gh.ReviewChangesRequested:
 			g, s, word = "✗", T.Red, "requested changes"
-		case "DISMISSED":
+		case gh.ReviewDismissed:
 			g, s, word = "○", T.Dim, "dismissed"
 		}
 		author := T.Author(r.Author).Render(r.Author)
@@ -717,11 +717,7 @@ func (a *App) ghListPanel(p *ghPanel, pn pane, idx string, w, h int) string {
 	case d.err != nil && len(d.items) == 0:
 		panel.Body = wrap(T.Red.Render(" "+d.err.Error()), w-3)
 	case len(d.items) == 0:
-		what := "pull requests"
-		if p.kind == gh.Issue {
-			what = "issues"
-		}
-		panel.Body = []string{T.Dim.Render(" No " + what + " here.")}
+		panel.Body = []string{T.Dim.Render(" No " + p.kind.Plural() + " here.")}
 	default:
 		panel.Body = renderList(&p.list, w-2, rows, focused, a.ghRow(p))
 	}
@@ -853,14 +849,14 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 		})
 		return true, nil
 	case "x":
-		if it.State != "OPEN" {
+		if it.State != gh.StateOpen {
 			return true, a.flash(num+" isn't open", true)
 		}
 		a.confirmDanger("Close "+num+"?", []string{it.Title},
 			ghRun("Closing", "Closed "+num, func() proc.Result { return gh.Close(it) }))
 		return true, nil
 	case "X":
-		if it.State != "CLOSED" {
+		if it.State != gh.StateClosed {
 			return true, a.flash(num+" isn't closed", true)
 		}
 		return true, ghRun("Reopening", "Reopened "+num, func() proc.Result { return gh.Reopen(it) })
@@ -883,7 +879,7 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 		}
 		return true, ghRun("Marking ready", num+" is ready for review", func() proc.Result { return gh.MarkReady(it) })
 	case "m":
-		if it.State != "OPEN" {
+		if it.State != gh.StateOpen {
 			return true, a.flash(num+" isn't open", true)
 		}
 		merge := func(method string) func() tea.Cmd {
@@ -903,11 +899,7 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 
 func (a *App) openGHSearch() {
 	p := a.previewPanel()
-	what := "pull requests"
-	if p.kind == gh.Issue {
-		what = "issues"
-	}
-	a.modal = newInput("Search "+what, "GitHub search syntax, e.g. repo:charmbracelet/bubbletea is:open label:bug", a.gh.search[p.kind], func(q string) tea.Cmd {
+	a.modal = newInput("Search "+p.kind.Plural(), "GitHub search syntax, e.g. repo:charmbracelet/bubbletea is:open label:bug", a.gh.search[p.kind], func(q string) tea.Cmd {
 		q = strings.TrimSpace(q)
 		a.gh.search[p.kind] = q
 		if q == "" {
