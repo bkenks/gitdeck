@@ -518,11 +518,23 @@ func NewBranch(dir, n string) proc.Result    { return Run(dir, "checkout", "-b",
 func DeleteBranch(dir, n string) proc.Result { return Run(dir, "branch", "-d", n) }
 func Fetch(dir string) proc.Result           { return Run(dir, "fetch", "--all", "--prune") }
 func Pull(dir string) proc.Result            { return Run(dir, "pull") }
-func PullFFOnly(dir string) proc.Result      { return Run(dir, "pull", "--ff-only") }
 func StashApply(dir, ref string) proc.Result { return Run(dir, "stash", "apply", ref) }
 func StashPop(dir, ref string) proc.Result   { return Run(dir, "stash", "pop", ref) }
 func StashDrop(dir, ref string) proc.Result  { return Run(dir, "stash", "drop", ref) }
 func Clone(url, dest string) proc.Result     { return Run(filepath.Dir(dest), "clone", url, dest) }
+
+// PullFFOnly fast-forwards the current branch to its upstream and reports
+// whether HEAD moved. Comparing HEAD rather than reading git's output tells
+// a real pull from a no-op one whatever language git speaks.
+func PullFFOnly(dir string) (r proc.Result, moved bool) {
+	before, _ := Read(dir, "rev-parse", "HEAD")
+	r = Run(dir, "pull", "--ff-only")
+	if r.Err != nil {
+		return r, false
+	}
+	after, _ := Read(dir, "rev-parse", "HEAD")
+	return r, after != before
+}
 
 func StashPush(dir, msg string) proc.Result {
 	args := []string{"stash", "push", "--include-untracked"}

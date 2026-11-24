@@ -24,9 +24,7 @@ func (a *App) openLazygit(dir string, args ...string) tea.Cmd {
 	argv := append(append([]string{}, a.cfg.Lazygit.Args...), args...)
 	cmd := exec.Command(a.cfg.Lazygit.Command, argv...)
 	cmd.Dir = dir
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return execDoneMsg{err: err, dir: dir, what: proc.Display("lazygit", args...)}
-	})
+	return tea.ExecProcess(cmd, a.execDone(dir, proc.Display("lazygit", args...)))
 }
 
 func (a *App) shell() string {
@@ -47,9 +45,7 @@ func (a *App) openShell(dir string) tea.Cmd {
 	cmd := exec.Command(a.shell())
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GITDECK=1")
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return execDoneMsg{err: err, dir: dir, what: "shell"}
-	})
+	return tea.ExecProcess(cmd, a.execDone(dir, "shell"))
 }
 
 func (a *App) openEditor(dir, path string) tea.Cmd {
@@ -65,9 +61,7 @@ func (a *App) openEditor(dir, path string) tea.Cmd {
 	f := strings.Fields(editor)
 	cmd := exec.Command(f[0], append(f[1:], path)...)
 	cmd.Dir = dir
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return execDoneMsg{err: err, dir: dir, what: f[0] + " " + path}
-	})
+	return tea.ExecProcess(cmd, a.execDone(dir, f[0]+" "+path))
 }
 
 // customKeybind runs a user keybind from the config, if one matches.
@@ -88,10 +82,7 @@ func (a *App) customKeybind(key string) tea.Cmd {
 		cmd := exec.Command(a.shell(), "-c", script)
 		cmd.Dir = repo.Path
 		cmd.Env = append(os.Environ(), "GITDECK=1", "GITDECK_REPO="+repo.Path)
-		dir, name := repo.Path, kb.Name
-		return tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return execDoneMsg{err: err, dir: dir, what: name}
-		})
+		return tea.ExecProcess(cmd, a.execDone(repo.Path, kb.Name))
 	}
 	return nil
 }
@@ -157,7 +148,7 @@ func openURL(url string) tea.Cmd {
 		}
 		proc.Detach(cmd)
 		if err := cmd.Start(); err != nil {
-			return resultMsg{res: proc.Result{Cmd: "open " + url, Err: err}}
+			return resultMsg{results: []proc.Result{{Cmd: "open " + url, Err: err}}}
 		}
 		go func() { _ = cmd.Wait() }()
 		return nil

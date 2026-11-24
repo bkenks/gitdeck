@@ -152,22 +152,23 @@ type (
 	}
 	mainDebounceMsg struct{ key string }
 	repoDebounceMsg struct{ path string }
-	resultMsg       struct {
-		res     proc.Result
-		ok      string // toast on success
-		refresh bool   // reload the repo afterwards
-		rescan  bool   // rescan the repos dir afterwards
-		then    tea.Cmd
+	// resultMsg reports finished actions. Every result that ran a command
+	// goes in the command log, then one toast sums them all up: toast when
+	// set, else the failures' errors, else ok.
+	resultMsg struct {
+		results  []proc.Result
+		ok       string // toast when nothing failed
+		toast    string
+		toastErr bool
+		refresh  bool // reload each result's repo afterwards
+		rescan   bool // rescan the repos dir afterwards
+		// then runs on the UI goroutine once the results are in. Producers
+		// that only want it after a success leave it nil on failure.
+		then func() tea.Cmd
 	}
-	toastMsg    struct{ id int }
-	tickMsg     struct{}
-	execDoneMsg struct {
-		err  error
-		dir  string
-		what string
-	}
-	pullAllMsg struct{ results []proc.Result }
-	busyMsg    struct {
+	toastMsg struct{ id int }
+	tickMsg  struct{}
+	busyMsg  struct {
 		delta int
 		label string
 	}
@@ -280,8 +281,6 @@ func (a *App) update(msg tea.Msg) tea.Cmd {
 		return a.onScanned(msg)
 	case statsMsg:
 		return a.onStats(msg)
-	case clonedMsg:
-		return a.onCloned(msg)
 	case repoDebounceMsg:
 		return a.onRepoDebounce(msg.path)
 	case repoMsg:
@@ -290,11 +289,7 @@ func (a *App) update(msg tea.Msg) tea.Cmd {
 		return a.mainUpdate(msg)
 	case resultMsg:
 		return a.onResult(msg)
-	case pullAllMsg:
-		return a.onPullAll(msg)
-	case execDoneMsg:
-		return a.onExecDone(msg)
-	case ghUserMsg, ghSectionMsg, ghDetailMsg, ghDetailDebounceMsg, ghDiffMsg, branchPRsMsg, ghCheckoutMsg:
+	case ghUserMsg, ghSectionMsg, ghDetailMsg, ghDetailDebounceMsg, ghDiffMsg, branchPRsMsg:
 		return a.ghUpdate(msg)
 	}
 	// Anything else (cursor blinks and the like) belongs to an open modal.
@@ -327,15 +322,6 @@ func (a *App) mainUpdate(msg tea.Msg) tea.Cmd {
 		}
 	}
 	return nil
-}
-
-func (a *App) onExecDone(msg execDoneMsg) tea.Cmd {
-	var flash tea.Cmd
-	if msg.err != nil {
-		flash = a.flash(msg.what+": "+msg.err.Error(), true)
-	}
-	a.logCmd(msg.dir, msg.what, msg.err)
-	return tea.Batch(flash, a.refreshAll())
 }
 
 func (a *App) flash(text string, isErr bool) tea.Cmd {
@@ -371,32 +357,73 @@ func (a *App) withBusy(label string, work func() tea.Msg) tea.Cmd {
 
 // run wraps a git action as a busy command that reports back as a resultMsg.
 func (a *App) run(label string, refresh bool, ok string, fn func() proc.Result) tea.Cmd {
-	return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, refresh: refresh} })
+	return a.withBusy(label, func() tea.Msg {
+		return resultMsg{results: []proc.Result{fn()}, ok: ok, refresh: refresh}
+	})
 }
 
 func (a *App) onResult(msg resultMsg) tea.Cmd {
-	r := msg.res
-	if r.Cmd != "" {
-		a.logCmd(r.Dir, r.Cmd, r.Err)
-	}
-	var cmds []tea.Cmd
-	if r.Err != nil {
-		cmds = append(cmds, a.flash(r.Err.Error(), true))
-	} else if msg.ok != "" {
-		cmds = append(cmds, a.flash(msg.ok, false))
-	}
-	if msg.refresh && r.Dir != "" {
-		cmds = append(cmds, a.loadRepo(r.Dir), a.loadStats(r.Dir))
-		a.mainKey = "" // contents may have changed
-		cmds = append(cmds, a.syncMain())
+	cmds := []tea.Cmd{a.reportResults(msg)}
+	if msg.refresh {
+		cmds = append(cmds, a.reloadRepos(msg.results))
 	}
 	if msg.rescan {
 		cmds = append(cmds, a.scan())
 	}
-	if msg.then != nil && r.Err == nil {
-		cmds = append(cmds, msg.then)
+	if msg.then != nil {
+		cmds = append(cmds, msg.then())
 	}
 	return tea.Batch(cmds...)
+}
+
+// reportResults logs every result that ran a command and toasts once for
+// all of them.
+func (a *App) reportResults(msg resultMsg) tea.Cmd {
+	var failures []string
+	for _, r := range msg.results {
+		if r.Cmd != "" {
+			a.logCmd(r.Dir, r.Cmd, r.Err)
+		}
+		if r.Err != nil {
+			failures = append(failures, r.Err.Error())
+		}
+	}
+	switch {
+	case msg.toast != "":
+		return a.flash(msg.toast, msg.toastErr)
+	case len(failures) > 0:
+		return a.flash(strings.Join(failures, "; "), true)
+	case msg.ok != "":
+		return a.flash(msg.ok, false)
+	}
+	return nil
+}
+
+// reloadRepos reloads the repos results ran in.
+func (a *App) reloadRepos(results []proc.Result) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, r := range results {
+		if r.Dir != "" {
+			cmds = append(cmds, a.loadRepo(r.Dir), a.loadStats(r.Dir))
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	a.mainKey = "" // contents may have changed
+	return tea.Batch(append(cmds, a.syncMain())...)
+}
+
+// execDone reports a program gitdeck handed the terminal to, then reloads
+// whatever is on screen.
+func (a *App) execDone(dir, what string) tea.ExecCallback {
+	return func(err error) tea.Msg {
+		m := resultMsg{results: []proc.Result{{Dir: dir, Cmd: what, Err: err}}, then: a.refreshAll}
+		if err != nil {
+			m.toast, m.toastErr = what+": "+err.Error(), true
+		}
+		return m
+	}
 }
 
 // refreshAll reloads whatever is on screen.

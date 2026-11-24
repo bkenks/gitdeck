@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -354,37 +355,43 @@ func (a *App) pullAll() tea.Cmd {
 	}
 	return a.withBusy(fmt.Sprintf("Pulling %d repos", len(repos)), func() tea.Msg {
 		results := make([]proc.Result, len(repos))
+		moved := make([]bool, len(repos))
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 6)
 		for i, r := range repos {
 			sem <- struct{}{}
 			wg.Go(func() {
 				defer func() { <-sem }()
-				results[i] = git.PullFFOnly(r.Path)
+				results[i], moved[i] = git.PullFFOnly(r.Path)
 			})
 		}
 		wg.Wait()
-		return pullAllMsg{results}
+		return a.pulledAll(results, moved)
 	})
 }
 
-func (a *App) onPullAll(msg pullAllMsg) tea.Cmd {
-	failed := 0
+// pulledAll reports a pull of every repo. Pulls that changed nothing stay
+// out of the command log.
+func (a *App) pulledAll(results []proc.Result, moved []bool) resultMsg {
+	var logged []proc.Result
 	var paths []string
-	for _, r := range msg.results {
+	failed := 0
+	for i, r := range results {
 		paths = append(paths, r.Dir)
 		if r.Err != nil {
 			failed++
-			a.logCmd(r.Dir, r.Cmd, r.Err)
-		} else if !strings.Contains(r.Output, "Already up to date") {
-			a.logCmd(r.Dir, r.Cmd, nil)
+		}
+		if r.Err != nil || moved[i] {
+			logged = append(logged, r)
 		}
 	}
-	text := "Pulled " + plural(len(msg.results)-failed, "repo")
+	text := "Pulled " + plural(len(results)-failed, "repo")
 	if failed > 0 {
 		text += fmt.Sprintf(", %d couldn't fast-forward (see command log)", failed)
 	}
-	return tea.Batch(a.flash(text, failed > 0), a.loadAllStats(paths), a.refreshAll())
+	return resultMsg{results: logged, toast: text, toastErr: failed > 0, then: func() tea.Cmd {
+		return tea.Batch(a.loadAllStats(paths), a.refreshAll())
+	}}
 }
 
 func (a *App) confirmDelete(r git.Repo) {
@@ -414,7 +421,8 @@ func (a *App) confirmDelete(r git.Repo) {
 	root := a.cfg.RepoRoot()
 	path := r.Path
 	a.confirmDanger("Delete "+r.Name+"?", body, func() tea.Msg {
-		return resultMsg{res: git.Remove(root, path), ok: "Deleted " + filepath.Base(path), rescan: true}
+		res := git.Remove(root, path)
+		return resultMsg{results: []proc.Result{res}, ok: "Deleted " + filepath.Base(path), rescan: true}
 	})
 }
 
@@ -498,64 +506,56 @@ func (a *App) openClone() {
 func (a *App) cloneAll(urls []string, root string) tea.Cmd {
 	return a.withBusy("Cloning "+plural(len(urls), "repo"), func() tea.Msg {
 		var first string
-		var failed []string
-		var last proc.Result
-		for _, u := range urls {
-			dest, slug, err := git.CloneDest(root, u)
-			if err != nil {
-				failed = append(failed, err.Error())
-				continue
-			}
-			if dirExists(dest) {
-				failed = append(failed, config.TildePath(dest)+" already exists")
-				if first == "" {
-					first = dest
-				}
-				continue
-			}
-			_ = os.MkdirAll(filepath.Dir(dest), 0o755)
-			if slug != "" {
-				last = gh.Clone(slug, dest)
-			} else {
-				last = git.Clone(u, dest)
-			}
-			if last.Err != nil {
-				failed = append(failed, last.Err.Error())
-				continue
-			}
+		results := make([]proc.Result, len(urls))
+		for i, u := range urls {
+			var dest string
+			results[i], dest = cloneOne(root, u)
 			if first == "" {
 				first = dest
 			}
 		}
-		return clonedMsg{first: first, failed: failed, n: len(urls), last: last}
+		return a.clonedAll(results, first)
 	})
 }
 
-type clonedMsg struct {
-	first  string
-	failed []string
-	n      int
-	last   proc.Result
+// cloneOne clones url under root. dest is where the repo now is, or "" when
+// there's nothing there to select. A failure that ran no command comes back
+// as a result with only Err set, which keeps it out of the command log.
+func cloneOne(root, url string) (r proc.Result, dest string) {
+	dest, slug, err := git.CloneDest(root, url)
+	if err != nil {
+		return proc.Result{Err: err}, ""
+	}
+	if dirExists(dest) {
+		return proc.Result{Err: errors.New(config.TildePath(dest) + " already exists")}, dest
+	}
+	_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+	if slug != "" {
+		r = gh.Clone(slug, dest)
+	} else {
+		r = git.Clone(url, dest)
+	}
+	if r.Err != nil {
+		return r, ""
+	}
+	return r, dest
+}
+
+// clonedAll reports a batch of clones, selecting first once the rescan
+// finds it.
+func (a *App) clonedAll(results []proc.Result, first string) resultMsg {
+	m := resultMsg{results: results, ok: "Cloned " + plural(len(results), "repo"), rescan: true}
+	if first != "" {
+		m.then = func() tea.Cmd {
+			a.selectAfterScan = first
+			a.touch(first)
+			return nil
+		}
+	}
+	return m
 }
 
 type askReposDirMsg struct{}
-
-func (a *App) onCloned(msg clonedMsg) tea.Cmd {
-	if msg.last.Cmd != "" {
-		a.logCmd(msg.last.Dir, msg.last.Cmd, msg.last.Err)
-	}
-	var c tea.Cmd
-	if len(msg.failed) > 0 {
-		c = a.flash(strings.Join(msg.failed, "; "), true)
-	} else {
-		c = a.flash("Cloned "+plural(msg.n, "repo"), false)
-	}
-	if msg.first != "" {
-		a.selectAfterScan = msg.first
-		a.touch(msg.first)
-	}
-	return tea.Batch(c, a.scan())
-}
 
 func (a *App) openReposDirPrompt() {
 	def := "~/Development"

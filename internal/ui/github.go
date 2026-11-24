@@ -86,13 +86,6 @@ type (
 		slug string
 		m    map[string]gh.BranchPR
 	}
-	ghCheckoutMsg struct {
-		res    proc.Result
-		path   string
-		cloned bool
-		lazy   bool
-		item   gh.Item
-	}
 )
 
 func newGHState(cfg config.Config) ghState {
@@ -380,8 +373,6 @@ func (a *App) ghUpdate(msg tea.Msg) tea.Cmd {
 		d.version++
 	case branchPRsMsg:
 		g.branchPRs[msg.slug] = msg.m
-	case ghCheckoutMsg:
-		return a.onGHCheckout(msg)
 	}
 	return nil
 }
@@ -833,7 +824,13 @@ func (a *App) ghItemKey(key string, it gh.Item) (bool, tea.Cmd) {
 	}
 	ghRun := func(label, ok string, fn func() proc.Result) tea.Cmd {
 		then := refresh()
-		return a.withBusy(label, func() tea.Msg { return resultMsg{res: fn(), ok: ok, then: then} })
+		return a.withBusy(label, func() tea.Msg {
+			m := resultMsg{results: []proc.Result{fn()}, ok: ok}
+			if m.results[0].Err == nil {
+				m.then = func() tea.Cmd { return then }
+			}
+			return m
+		})
 	}
 	switch key {
 	case "o":
@@ -943,33 +940,43 @@ func (a *App) ghCheckoutCmd(it gh.Item, path string, clone, lazy bool) tea.Cmd {
 	return a.withBusy("Checking out #"+itoa(it.Number), func() tea.Msg {
 		if clone {
 			if r := gh.Clone(it.Repo, path); r.Err != nil {
-				return ghCheckoutMsg{res: r, path: path, item: it}
+				// Logged against the repo, like the checkout it was for.
+				r.Dir = path
+				return resultMsg{results: []proc.Result{r}}
 			}
 		}
-		return ghCheckoutMsg{res: gh.Checkout(path, it), path: path, cloned: clone, lazy: lazy, item: it}
+		return a.checkedOut(it, gh.Checkout(path, it), clone, lazy)
 	})
 }
 
-func (a *App) onGHCheckout(msg ghCheckoutMsg) tea.Cmd {
-	a.logCmd(msg.path, msg.res.Cmd, msg.res.Err)
-	if msg.res.Err != nil {
-		return a.flash(msg.res.Err.Error(), true)
+// checkedOut reports a PR checkout in r.Dir and, when it worked, jumps to
+// the branch in the local view (or straight into lazygit). cloned says the
+// repo is new, so it has to be scanned before it can be selected.
+func (a *App) checkedOut(it gh.Item, r proc.Result, cloned, lazy bool) resultMsg {
+	ok := "Checked out #" + itoa(it.Number) + " (" + it.Head + ")"
+	m := resultMsg{results: []proc.Result{r}, ok: ok}
+	if r.Err == nil {
+		m.then = func() tea.Cmd { return a.showCheckout(r.Dir, cloned, lazy) }
 	}
-	cmds := []tea.Cmd{a.flash("Checked out #"+itoa(msg.item.Number)+" ("+msg.item.Head+")", false)}
+	return m
+}
+
+func (a *App) showCheckout(path string, cloned, lazy bool) tea.Cmd {
 	if a.mode == modeGitHub {
 		a.gfocus = a.focus
 		a.mode = modeLocal
 	}
 	a.focus, a.lfocus = pBranches, pBranches
 	a.branchTab = 0
-	if msg.cloned {
-		a.selectAfterScan = msg.path
+	var cmds []tea.Cmd
+	if cloned {
+		a.selectAfterScan = path
 		cmds = append(cmds, a.scan())
 	} else {
-		cmds = append(cmds, a.selectRepoPath(msg.path))
+		cmds = append(cmds, a.selectRepoPath(path))
 	}
-	if msg.lazy {
-		cmds = append(cmds, a.openLazygit(msg.path, "status"))
+	if lazy {
+		cmds = append(cmds, a.openLazygit(path, "status"))
 	}
 	return tea.Batch(cmds...)
 }

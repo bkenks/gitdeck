@@ -185,3 +185,43 @@ func TestReadAndRunErrors(t *testing.T) {
 		t.Errorf("run result: %+v", r)
 	}
 }
+
+func TestPullFFOnlyReportsWhetherHEADMoved(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	upstream, clone := t.TempDir(), filepath.Join(t.TempDir(), "clone")
+	git := func(dir string, args ...string) {
+		t.Helper()
+		if r := Run(dir, args...); r.Err != nil {
+			t.Fatalf("git %v: %v", args, r.Err)
+		}
+	}
+	commit := func(msg string) {
+		t.Helper()
+		git(upstream, "-c", "user.email=t@example.com", "-c", "user.name=Test User",
+			"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", msg)
+	}
+	git(upstream, "init", "-q", "-b", "main")
+	commit("first")
+	git(upstream, "clone", "-q", upstream, clone)
+
+	if r, moved := PullFFOnly(clone); r.Err != nil || moved {
+		t.Fatalf("pull with nothing new: moved %v, %+v", moved, r)
+	}
+	commit("second")
+	r, moved := PullFFOnly(clone)
+	if r.Err != nil || !moved {
+		t.Fatalf("pull with a new commit: moved %v, %+v", moved, r)
+	}
+	if r.Cmd != "git pull --ff-only" || r.Dir != clone {
+		t.Errorf("result: %+v", r)
+	}
+
+	git(clone, "-c", "user.email=t@example.com", "-c", "user.name=Test User",
+		"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "local")
+	commit("third")
+	if r, moved := PullFFOnly(clone); r.Err == nil || moved {
+		t.Fatalf("pull that can't fast-forward: moved %v, %+v", moved, r)
+	}
+}
