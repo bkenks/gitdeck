@@ -17,7 +17,7 @@ run = "scripts/build.sh --all"
 
 [tasks.install]
 description = "Build and install gitdeck to $GOBIN (or $(go env GOPATH)/bin)"
-run = 'go install -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" .'
+run = "scripts/build.sh --install"
 
 [tasks.run]
 description = "Build and run gitdeck from source"
@@ -28,10 +28,9 @@ description = "Run the tests with the race detector"
 run = "go test -race ./..."
 
 [tasks.lint]
-description = "gofmt, go vet, golangci-lint, shellcheck and shfmt"
+description = "gofmt, golangci-lint (includes go vet), shellcheck and shfmt"
 run = [
   'test -z "$(gofmt -l .)" || { gofmt -l .; echo "run: gofmt -w ."; exit 1; }',
-  "go vet ./...",
   "golangci-lint run",
   "shellcheck scripts/*.sh install.sh",
   "shfmt -d -i 2 scripts/*.sh install.sh",

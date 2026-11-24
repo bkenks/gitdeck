@@ -2,6 +2,7 @@
 # Build gitdeck.
 #
 #   scripts/build.sh                 this machine -> build/bin/gitdeck
+#   scripts/build.sh --install       this machine -> $GOBIN (go install)
 #   scripts/build.sh --all [VERSION] release matrix -> build/dist/* + SHA256SUMS
 #
 # VERSION defaults to `git describe`. CI passes the tag being released, so
@@ -28,10 +29,17 @@ ldflags() { echo "-s -w -X main.version=$1"; }
 
 build_host() {
   local version
-  version="$(version_or_describe "${1:-}")"
+  version="$(version_or_describe)"
   mkdir -p build/bin
   go build -trimpath -ldflags "$(ldflags "$version")" -o build/bin/gitdeck .
   echo "build/bin/gitdeck ($version)"
+}
+
+install_host() {
+  local version
+  version="$(version_or_describe)"
+  go install -trimpath -ldflags "$(ldflags "$version")" .
+  echo "installed gitdeck ($version)"
 }
 
 build_all() {
@@ -55,9 +63,10 @@ build_all() {
 
 case "${1:-}" in
 --all) build_all "${2:-}" ;;
+--install) install_host ;;
 "") build_host ;;
 *)
-  echo "usage: scripts/build.sh [--all [VERSION]]" >&2
+  echo "usage: scripts/build.sh [--install | --all [VERSION]]" >&2
   exit 2
   ;;
 esac
